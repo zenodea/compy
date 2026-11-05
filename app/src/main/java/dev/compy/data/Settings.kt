@@ -58,6 +58,10 @@ data class Settings(
     val collapsedSessions: Set<String> = emptySet(),
     val activityMode: Boolean = false,
     val composerSendsEnter: Boolean = true,
+    /** Stay connected in the background and notify when an agent needs attention. */
+    val backgroundAlerts: Boolean = true,
+    val askedNotificationPermission: Boolean = false,
+    val askedBatteryExemption: Boolean = false,
     val lastServerId: String? = null,
     val lastSessionId: String? = null,
 )

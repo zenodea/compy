@@ -20,8 +20,8 @@ android {
         applicationId = "dev.compy"
         minSdk = 34
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.1.3"
+        versionCode = 5
+        versionName = "0.2.0"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         externalNativeBuild {
             cmake {
@@ -88,12 +88,6 @@ android {
     packaging { jniLibs { useLegacyPackaging = false } }
     androidResources { noCompress += "ttf" }
     testOptions { unitTests.isReturnDefaultValues = true }
-}
-
-// Icons rendered from a local copy of Rex (scripts/import-rex-icons.sh). Never in release builds.
-if (rootProject.file("local-icons").exists() && !project.hasProperty("noLocalIcons")) {
-    android.sourceSets.getByName("debug").assets.srcDir(rootProject.file("local-icons"))
-    android.sourceSets.getByName("qa").assets.srcDir(rootProject.file("local-icons"))
 }
 
 // Builds libghostty-vt from the pinned submodule with Zig before CMake links it.

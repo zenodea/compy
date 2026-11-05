@@ -21,13 +21,14 @@ In Compy, tap **Scan pairing code** and scan what it shows, or type the `ts.net`
 - **Servers:** all your servers in one list. Activity view groups panes by what needs you.
 - **Commands:** tap `⌘` for a searchable palette of Compy's commands and the host's Rex actions; hold it to latch the modifier.
 - **Terminal tools:** tap links, find in scrollback, and jump between prompts or copy a command's output when the shell marks them with OSC 133.
+- **Notifications:** Compy can stay connected in the background and alert you when an agent needs you, finishes or fails. Open the pane from the notification, or reply to it directly.
 - **Status:** progress rings, the current folder under each window, and a haptic on the terminal bell.
 - **Input:** direct typing, a customizable key bar, a composer with voice typing, and hardware keyboard and mouse support.
 - **Look:** the whole app takes its colors from the Rex host's terminal theme, or from your wallpaper if you prefer.
 - **Android:** predictive back, a share target for text, app shortcuts, a home screen widget and a Quick Settings tile.
 - **Privacy:** no telemetry. Biometric lock is on when the device supports it, and screenshot blocking is optional.
 
-Compy only stays connected while it's open, so the widget and tile show the last known state, with its age.
+With background alerts off, Compy only stays connected while it's open, and the widget and tile show the last known state, with its age.
 
 ## Build
 
@@ -53,8 +54,6 @@ rex server run --listen http://127.0.0.1:18765 --allow-anonymous
 
 Compy ships open icons from [Simple Icons](https://simpleicons.org), listed in `app/src/main/assets/icons/ATTRIBUTION.md`. To change the list, edit and run `scripts/generate-program-icons.py`.
 
-If you have Rex installed on a Mac, `scripts/import-rex-icons.sh` renders its icons into `local-icons/` for your own debug and QA builds. Those icons belong to Rex's makers, so that folder is ignored by Git and left out of release builds. Don't commit or redistribute it.
-
 ## Releases
 
 See [docs/RELEASING.md](docs/RELEASING.md).
@@ -65,4 +64,4 @@ Compy uses Rex's documented API, which any server serves at `/llms.txt`: a JSON 
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE). The bundled JetBrains Mono Nerd Font is under the SIL Open Font License; see `app/src/main/assets/fonts/OFL.txt`. libghostty-vt is MIT.
+Apache-2.0. See [LICENSE](LICENSE). The bundled JetBrains Mono Nerd Font and Noto symbol fonts are under the SIL Open Font License; see `app/src/main/assets/fonts/`. libghostty-vt is MIT.

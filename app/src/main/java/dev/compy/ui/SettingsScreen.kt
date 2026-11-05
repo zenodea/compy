@@ -67,7 +67,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.core.app.NotificationManagerCompat
 import dev.compy.AppState
+import dev.compy.system.batteryExemptionIntent
+import dev.compy.system.isIgnoringBatteryOptimizations
+import dev.compy.system.notificationSettingsIntent
 import dev.compy.data.DefaultKeyBar
 import dev.compy.data.KeyDef
 import dev.compy.data.Settings
@@ -193,6 +197,30 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
                 }
             }
             item {
+                Group("Notifications") {
+                    val notificationsAllowed = NotificationManagerCompat.from(context).areNotificationsEnabled()
+                    SwitchRow(
+                        "Alert me when Compy is closed",
+                        "Stays connected in the background and shows a silent ongoing notification. Uses some battery.",
+                        settings.backgroundAlerts,
+                    ) { v -> update { it.copy(backgroundAlerts = v) } }
+                    if (!notificationsAllowed) {
+                        Row2("Notifications are off", "Android is blocking them, so alerts can't appear. Tap to turn them on.", onClick = {
+                            context.startActivity(notificationSettingsIntent(context))
+                        })
+                    } else {
+                        Row2("Choose alert types", "Sound and importance for each kind of alert", onClick = {
+                            context.startActivity(notificationSettingsIntent(context))
+                        })
+                    }
+                    if (settings.backgroundAlerts && !isIgnoringBatteryOptimizations(context)) {
+                        Row2("Allow background use", "Without this, your phone may stop the connection alerts depend on", onClick = {
+                            context.startActivity(batteryExemptionIntent(context))
+                        })
+                    }
+                }
+            }
+            item {
                 Group("Terminal") {
                     Box {
                         Row2(
@@ -263,9 +291,9 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
             title = { Text("Open source licenses") },
             text = {
                 Text(
-                    "Compy: Apache-2.0\nlibghostty-vt: MIT\nJetBrains Mono and Nerd Fonts: SIL Open Font License 1.1\n" +
+                    "Compy: Apache-2.0\nlibghostty-vt: MIT\nJetBrains Mono, Nerd Fonts and Noto Sans symbols: SIL Open Font License 1.1\n" +
                         "AndroidX and Compose: Apache-2.0\nKotlin and kotlinx: Apache-2.0\nOkHttp: Apache-2.0\nZXing: Apache-2.0\n\n" +
-                        "Program icons: Simple Icons, mostly CC0-1.0, with the rest listed in assets/icons/ATTRIBUTION.md. " +
+                        "Program icons: Simple Icons and Nerd Fonts, mostly CC0-1.0, with the rest listed in assets/icons/ATTRIBUTION.md. " +
                         "Names and logos are trademarks of their owners and don't imply endorsement of Compy.",
                 )
             },

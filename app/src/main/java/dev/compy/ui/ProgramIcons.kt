@@ -1,9 +1,5 @@
 package dev.compy.ui
 
-import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.offset
@@ -13,24 +9,22 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.Typeface
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.boolean
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import dev.compy.term.TerminalFonts
 
 /** Maps what a terminal is running to an icon name. */
 internal object ProgramNames {
@@ -51,7 +45,8 @@ internal object ProgramNames {
         "node" to "nodedotjs", "fish" to "fishshell", "bash" to "gnubash", "copilot" to "githubcopilot",
         "gemini" to "googlegemini", "emacs" to "gnuemacs", "hugging-face" to "huggingface", "kube" to "kubernetes",
         "mistral" to "mistralai", "nix" to "nixos", "postgres" to "postgresql", "brew" to "homebrew",
-        "clang" to "cplusplus", "java" to "openjdk",
+        "clang" to "cplusplus", "java" to "openjdk", "proton-drive" to "protondrive",
+        "unreal-engine" to "unrealengine", "apple-container" to "apple",
     )
 
     /**
@@ -72,22 +67,17 @@ internal object ProgramNames {
     fun slug(name: String) = SLUGS[name] ?: name
 }
 
-/** Icons rendered from a local copy of Rex, which only exist in the owner's own builds. */
-internal object LocalProgramIcons {
-    private var index: Map<String, Boolean>? = null
-    private val bitmaps = HashMap<String, Bitmap?>()
+/** Logos with no open vector icon that the bundled Nerd Font includes, with their brand colors. */
+private data class FontGlyph(val text: String, val color: Long)
 
-    private fun index(context: Context): Map<String, Boolean> = index ?: runCatching {
-        val text = context.assets.open("rex-icons/index.json").bufferedReader().use { it.readText() }
-        (Json.parseToJsonElement(text) as JsonObject).mapValues { (_, v) -> v.jsonObject["mono"]!!.jsonPrimitive.boolean }
-    }.getOrDefault(emptyMap()).also { index = it }
-
-    fun isMono(context: Context, name: String) = index(context)[name]
-
-    fun bitmap(context: Context, name: String): Bitmap? = bitmaps.getOrPut(name) {
-        runCatching { context.assets.open("rex-icons/$name.png").use(BitmapFactory::decodeStream) }.getOrNull()
-    }
-}
+private val FontGlyphs = mapOf(
+    "rust" to FontGlyph("\uE7A8", 0xFFDEA584),
+    "ruby" to FontGlyph("\uE739", 0xFFCC342D),
+    "neovim" to FontGlyph("\uF36F", 0xFF57A143),
+    "zig" to FontGlyph("\uE6A9", 0xFFF7A41D),
+    "php" to FontGlyph("\uE73D", 0xFF777BB4),
+    "emacs" to FontGlyph("\uE632", 0xFF7F5AB6),
+)
 
 /**
  * A program's rounded icon tile, using the brand color when there is one. With several panes, a
@@ -99,14 +89,14 @@ fun ProgramTile(names: List<String>, modifier: Modifier = Modifier, size: Dp = 2
     val scheme = MaterialTheme.colorScheme
     val shape = RoundedCornerShape(size * 0.28f)
     val canvasIsDark = scheme.background.luminance() < 0.3f
-    val glyphs = remember(names) {
+    val match = remember(names) {
         names.firstNotNullOfOrNull { name ->
-            val mono = LocalProgramIcons.isMono(context, name)
-            val glyph = SimpleIconGlyphs[ProgramNames.slug(name)]
-            if (mono != null || glyph != null) Triple(name, mono, glyph) else null
+            val vector = SimpleIconGlyphs[ProgramNames.slug(name)]
+            val font = FontGlyphs[name]
+            if (vector != null || font != null) vector to font else null
         }
     }
-    val brand = glyphs?.third?.let { Color(it.brandColor) }
+    val brand = match?.first?.let { Color(it.brandColor) } ?: match?.second?.let { Color(it.color) }
     // A near-black or near-white logo would vanish against the canvas, so give it a neutral tile.
     val usable = brand?.takeIf { if (canvasIsDark) it.luminance() > 0.04f else it.luminance() < 0.85f }
     val tile = usable ?: scheme.surfaceContainerHighest
@@ -127,13 +117,14 @@ fun ProgramTile(names: List<String>, modifier: Modifier = Modifier, size: Dp = 2
         }
         Box(Modifier.size(size).clip(shape).background(tile), contentAlignment = Alignment.Center) {
             val glyphSize = size * 0.62f
-            val local = glyphs?.first?.let { name -> if (glyphs.second != null) LocalProgramIcons.bitmap(context, name) else null }
+            val vector = match?.first
+            val font = match?.second
             when {
-                local != null -> Image(
-                    local.asImageBitmap(), null, Modifier.size(glyphSize),
-                    colorFilter = if (glyphs.second == true) ColorFilter.tint(tint) else null,
-                )
-                glyphs?.third != null -> Icon(painterResource(glyphs.third!!.drawable), null, Modifier.size(glyphSize), tint = tint)
+                vector != null -> Icon(painterResource(vector.drawable), null, Modifier.size(glyphSize), tint = tint)
+                font != null -> {
+                    val family = remember { FontFamily(Typeface(TerminalFonts.bundled(context).regular)) }
+                    Text(font.text, color = tint, fontFamily = family, fontSize = with(LocalDensity.current) { glyphSize.toSp() }, lineHeight = with(LocalDensity.current) { size.toSp() }, softWrap = false)
+                }
                 else -> Icon(Icons.Rounded.Terminal, null, Modifier.size(glyphSize), tint = scheme.onSurfaceVariant)
             }
         }

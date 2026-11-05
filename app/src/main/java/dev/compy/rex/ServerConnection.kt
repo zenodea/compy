@@ -151,6 +151,31 @@ class ServerConnection(
         _state.value = ConnectionState.Offline("Paused")
     }
 
+    /**
+     * Stops streaming terminal output but stays connected for events, which is all alerts need.
+     * Terminals resume from where they were when [resumeStreams] is called.
+     */
+    fun pauseStreams() {
+        terminals.values.forEach { it.pause() }
+    }
+
+    fun resumeStreams() {
+        terminals.values.forEach { it.reconnect() }
+    }
+
+    /** Sends a reply typed in a notification to a pane, followed by Enter. */
+    suspend fun sendReply(sessionId: String, blockId: String, text: String) {
+        val c = control ?: throw RexError("disconnected", "Not connected to ${config.label}", 0)
+        ensureAttached(sessionId)
+        c.call("block.event", ids(sessionId, blockId) {
+            put("event", buildJsonObject {
+                put("type", "paste")
+                put("payload", buildJsonObject { put("text", text) })
+            })
+        })
+        c.call("client.key", ids(sessionId, blockId) { put("key", RexKey.ENTER.toJson()) })
+    }
+
     /** Ends the client on the server and forgets all local state. */
     fun shutdown() {
         wanted = false
@@ -227,6 +252,8 @@ class ServerConnection(
         _serverVersion.value = result?.get("server_status").obj()?.get("rex_version").str()
         val sessions = parseSessions(result?.get("attach_all").obj()?.get("sessions"))
         _sessions.value = sessions
+        // Events are lost while disconnected, so read every block's status again.
+        statusRead.clear()
         val keep = sessions.map { it.id }.toSet()
         _views.update { it.filterKeys(keep::contains) }
         for (session in sessions) refreshView(session.id)

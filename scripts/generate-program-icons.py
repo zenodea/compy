@@ -13,12 +13,15 @@ from pathlib import Path
 VERSION = "16.36.0"
 URL = f"https://registry.npmjs.org/simple-icons/-/simple-icons-{VERSION}.tgz"
 SLUGS = """
-claude anthropic googlegemini githubcopilot cursor git github gitlab docker python nodedotjs npm
-pnpm yarn bun deno rust go zig ruby php swift kotlin openjdk cplusplus lua elixir haskell dotnet
-vim neovim gnuemacs helix tmux gnubash zsh fishshell nushell postgresql sqlite redis mysql
-kubernetes terraform ansible nixos homebrew tailscale vercel cloudflare ollama mistralai
-huggingface jupyter xcode
+amp anthropic ansible azuredevops bazel buildkite bun claude cloudflare coder cplusplus cursor dart
+datadog deno docker dotnet elixir expo flutter git github githubcopilot gitlab gnubash go
+googlegemini haskell helix homebrew huggingface jupyter kubernetes lua meta mistralai mysql nixos
+nodedotjs npm nushell ollama openjdk packer php pnpm podman postgresql python railway rclone redis
+render sanity shopify sqlite stripe swift tailscale terraform tmux turborepo uv vagrant vault vercel
+vim vite xcode yarn zsh kotlin nomad consul gitlab neovim rust ruby zig
+protondrive unrealengine vercel hashicorp apple
 """.split()
+SLUGS = list(dict.fromkeys(SLUGS))
 ALLOWED_LICENSES = {None, "CC0-1.0", "CC-BY-3.0", "CC-BY-4.0", "MIT", "Apache-2.0", "BSD-3-Clause"}
 
 root = Path(__file__).resolve().parent.parent
@@ -61,7 +64,10 @@ by_slug = {entry.get("slug"): entry for entry in data}
 entries = []
 credits = []
 for slug in SLUGS:
-    entry = by_slug[slug]
+    entry = by_slug.get(slug)
+    if entry is None:
+        print(f"no such icon: {slug}")
+        continue
     license_type = (entry.get("license") or {}).get("type")
     if license_type not in ALLOWED_LICENSES:
         print(f"skipping {slug}: {license_type}")

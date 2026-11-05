@@ -1,6 +1,12 @@
 package dev.compy.ui
 
+import android.Manifest
 import androidx.activity.compose.PredictiveBackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import dev.compy.system.batteryExemptionIntent
+import dev.compy.system.isIgnoringBatteryOptimizations
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.graphicsLayer
@@ -85,6 +91,22 @@ fun CompyRoot(app: AppState, activity: FragmentActivity) {
     val scope = rememberCoroutineScope()
     val showMessage: (String) -> Unit = { message -> scope.launch { snackbars.showSnackbar(message) } }
 
+    val context = LocalContext.current
+    val batteryPrompt = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { }
+    val notificationPrompt = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        // Without the exemption, phones can stop the connection that alerts depend on.
+        if (granted && !settings.askedBatteryExemption && !isIgnoringBatteryOptimizations(context)) {
+            app.updateSettings { it.copy(askedBatteryExemption = true) }
+            batteryPrompt.launch(batteryExemptionIntent(context))
+        }
+    }
+    // Ask once, after there's a server to be alerted about, rather than at first launch.
+    LaunchedEffect(servers.isNotEmpty(), settings.backgroundAlerts) {
+        if (servers.isNotEmpty() && settings.backgroundAlerts && !settings.askedNotificationPermission) {
+            app.updateSettings { it.copy(askedNotificationPermission = true) }
+            notificationPrompt.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     val current = if (servers.isEmpty()) Screen.AddServer else screen
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         AnimatedContent(

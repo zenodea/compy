@@ -43,11 +43,18 @@ class MainActivity : FragmentActivity() {
     private fun handleIntent(intent: Intent?) {
         val server = intent?.getStringExtra(EXTRA_SERVER) ?: return
         val session = intent.getStringExtra(EXTRA_SESSION) ?: return
-        state.requestOpen(Selection(server, session))
+        val block = intent.getStringExtra(EXTRA_BLOCK)
+        if (block != null) {
+            state.notifier.cancel(block)
+            state.openBlock(server, session, block)
+        } else {
+            state.requestOpen(Selection(server, session))
+        }
     }
 
     companion object {
         const val EXTRA_SERVER = "server"
         const val EXTRA_SESSION = "session"
+        const val EXTRA_BLOCK = "block"
     }
 }

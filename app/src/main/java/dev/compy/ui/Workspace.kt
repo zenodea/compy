@@ -162,7 +162,10 @@ fun Workspace(
 
     LaunchedEffect(window?.focusedBlockId, window?.id) {
         controller.focusedBlockId = window?.focusedBlockId ?: window?.blocks?.firstOrNull()?.id
-        controller.focusedBlockId?.let(connection::clearAttention)
+        controller.focusedBlockId?.let {
+            connection.clearAttention(it)
+            app.notifier.cancel(it)
+        }
     }
     LaunchedEffect(foreground, state) {
         if (foreground && state == ConnectionState.Connected) controller.reapplySizes()
@@ -284,6 +287,7 @@ fun Workspace(
                                             controller.focusedView()?.showKeyboard()
                                         }
                                         connection.clearAttention(block)
+                                        app.notifier.cancel(block)
                                     },
                                     arranging = arranging,
                                     enabled = overviewClosed && id == window.id,

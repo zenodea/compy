@@ -90,6 +90,8 @@ data class ProgramStatus(
     val message: String?,
     /** Percent complete, when the program reports it. */
     val progress: Int? = null,
+    /** When the report arrived, by the server's clock, as an RFC 3339 timestamp. */
+    val updatedAt: String? = null,
 ) {
     val isBlocked get() = state == "blocked"
     val isWorking get() = state == "working"
@@ -194,6 +196,7 @@ internal fun parseStatusRecord(e: JsonElement?): ProgramStatus? {
         app = o["effective_app"].str() ?: o["app"].str(),
         message = o["msg"].str(),
         progress = o["progress"].int(),
+        updatedAt = o["updated_at"].str(),
     )
 }
 

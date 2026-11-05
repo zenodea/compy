@@ -2,10 +2,10 @@
 
 ## Share a test build
 
-The QA build is shrunk like a release and signed with the local debug key. Leave out local Rex icons when it will be uploaded anywhere:
+The QA build is shrunk like a release and signed with the local debug key:
 
 ```sh
-./gradlew :app:assembleQa -PnoLocalIcons
+./gradlew :app:assembleQa
 ```
 
 ## Sign a release APK

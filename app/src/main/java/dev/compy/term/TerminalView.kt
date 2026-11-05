@@ -356,9 +356,30 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                 n = appendCell(cp)
             }
             setTextStyle(flags, fg)
-            canvas.drawText(chars, 0, n, x * cellW, top + baseline, textPaint)
+            if (cp in 0x20..0x7E) {
+                canvas.drawText(chars, 0, n, x * cellW, top + baseline, textPaint)
+            } else {
+                drawFitted(canvas, n, x * cellW, top + baseline, (end - x) * cellW)
+            }
             drawDecorations(canvas, x, end - x, top, flags, fg)
             x = end
+        }
+    }
+
+    /**
+     * Draws a symbol inside its cells. Fallback fonts aren't monospaced, so a wide symbol is
+     * squeezed to fit and a narrow one is centered, which keeps the grid straight.
+     */
+    private fun drawFitted(canvas: Canvas, count: Int, left: Float, y: Float, width: Float) {
+        val measured = textPaint.measureText(chars, 0, count)
+        when {
+            measured > width * 1.02f -> {
+                textPaint.textScaleX = width / measured
+                canvas.drawText(chars, 0, count, left, y, textPaint)
+                textPaint.textScaleX = 1f
+            }
+            measured > 0f && measured < width * 0.9f -> canvas.drawText(chars, 0, count, left + (width - measured) / 2, y, textPaint)
+            else -> canvas.drawText(chars, 0, count, left, y, textPaint)
         }
     }
 

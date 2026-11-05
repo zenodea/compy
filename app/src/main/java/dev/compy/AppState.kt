@@ -13,9 +13,12 @@ import dev.compy.data.SavedServer
 import dev.compy.data.SavedTheme
 import dev.compy.data.Settings
 import dev.compy.data.SettingsStore
+import dev.compy.rex.ConnectionState
 import dev.compy.rex.ServerConfig
+import dev.compy.system.AlertNotifier
 import dev.compy.system.Shortcuts
 import dev.compy.system.StatusPublisher
+import dev.compy.system.WatchService
 import dev.compy.rex.ServerConnection
 import dev.compy.rex.TerminalColors
 import dev.compy.term.TerminalFonts
@@ -27,6 +30,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,9 +41,11 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import java.io.File
 import java.util.UUID
@@ -106,14 +113,21 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
         }
     }.stateIn(scope, SharingStarted.Eagerly, null)
 
+    val notifier = AlertNotifier(context, this)
+
     private var pauseJob: Job? = null
     private var leftAt = 0L
 
     init {
         scope.launch { servers.collect(::syncConnections) }
+        // React when alerts are switched on or off, or the first server is added.
+        scope.launch {
+            settings.map { it.backgroundAlerts }.distinctUntilChanged().drop(1).collect { if (_foreground.value) syncService() }
+        }
+        scope.launch { servers.map { it.isNotEmpty() }.distinctUntilChanged().drop(1).collect { if (_foreground.value) syncService() } }
         scope.launch {
             settings.collect { s ->
-                val font = s.customFontPath?.let { TerminalFonts.fromFile(File(it)) } ?: TerminalFonts.bundled(context)
+                val font = s.customFontPath?.let { TerminalFonts.fromFile(context, File(it)) } ?: TerminalFonts.bundled(context)
                 if (_fonts.value !== font) _fonts.value = font
             }
         }
@@ -149,7 +163,9 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
         context.getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(
             object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
-                    if (_foreground.value) _connections.value.values.forEach { it.retryNow() }
+                    if (_foreground.value || settings.value.backgroundAlerts) {
+                        _connections.value.values.forEach { it.retryNow() }
+                    }
                 }
             },
         )
@@ -167,7 +183,7 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
                     ServerConfig(s.id, s.label, s.url), http, scope,
                     clientLabel = Build.MODEL ?: "Android",
                     clientVersion = BuildConfigVersion,
-                ).also { if (_foreground.value) it.connect() }
+                ).also { if (_foreground.value || watching) it.connect() }
             }
         }
         current.filterKeys { it !in next }.values.forEach { it.shutdown() }
@@ -186,6 +202,7 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
         }
         // A host we've never seen needs one terminal opened to learn its colors.
         launch { c.selections.collect { requestOpen(Selection(c.config.id, it)) } }
+        launch { notifier.watch(c) }
         launch { c.views.collect { if (it.isNotEmpty() && c.config.id !in settings.value.hostThemes) c.learnHostTheme() } }
     }
 
@@ -200,6 +217,34 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
         (palette ?: TerminalColors.BUILTIN_PALETTE).take(16),
         scheme,
     )
+
+    /** True while the background service keeps connections open with the app closed. */
+    @Volatile var watching = false
+        private set
+
+    /** Called by the background service when it starts and stops. */
+    fun setWatching(active: Boolean) {
+        watching = active
+        if (active) _connections.value.values.forEach { it.connect() }
+    }
+
+    /** Opens a specific pane, such as from a notification, once its server is connected. */
+    fun openBlock(serverId: String, sessionId: String, blockId: String) {
+        requestOpen(Selection(serverId, sessionId))
+        scope.launch {
+            val connection = _connections.value[serverId] ?: return@launch
+            withTimeoutOrNull(OPEN_TIMEOUT_MS) { connection.state.first { it == ConnectionState.Connected } } ?: return@launch
+            connection.focusBlock(sessionId, blockId)
+        }
+    }
+
+    private fun syncService() {
+        if (settings.value.backgroundAlerts && servers.value.isNotEmpty()) {
+            WatchService.start(context)
+        } else {
+            WatchService.stop(context)
+        }
+    }
 
     fun select(selection: Selection?) {
         _selection.value = selection
@@ -249,7 +294,12 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
         pauseJob?.cancel()
         val away = System.currentTimeMillis() - leftAt
         if (leftAt != 0L && away > LOCK_AFTER_MS) _locked.value = true
-        _connections.value.values.forEach { it.retryNow() }
+        _connections.value.values.forEach {
+            it.retryNow()
+            it.resumeStreams()
+        }
+        // Services can only start reliably while the app is visible, so do it here.
+        syncService()
     }
 
     override fun onStop(owner: LifecycleOwner) {
@@ -260,13 +310,14 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
         pauseJob = scope.launch {
             _connections.value.values.forEach { runCatching { it.releaseAllOwnership() } }
             delay(PAUSE_AFTER_MS)
-            _connections.value.values.forEach { it.pause() }
+            _connections.value.values.forEach { if (watching) it.pauseStreams() else it.pause() }
         }
     }
 
     companion object {
         private const val PAUSE_AFTER_MS = 20_000L
         private const val LOCK_AFTER_MS = 60_000L
+        private const val OPEN_TIMEOUT_MS = 20_000L
         const val BuildConfigVersion = dev.compy.BuildConfig.VERSION_NAME
     }
 }
