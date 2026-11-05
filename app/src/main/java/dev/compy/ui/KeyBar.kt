@@ -73,6 +73,17 @@ private fun iconFor(name: String?): ImageVector? = when (name) {
     else -> null
 }
 
+/** What a key looks like: its icon, or otherwise its label. */
+@Composable
+fun KeyFace(def: KeyDef, tint: androidx.compose.ui.graphics.Color, modifier: Modifier = Modifier) {
+    val icon = iconFor(def.icon)
+    if (icon != null) {
+        Icon(icon, null, modifier.size(18.dp), tint = tint)
+    } else {
+        Text(def.label, modifier, style = MaterialTheme.typography.labelLarge, color = tint, maxLines = 1, softWrap = false)
+    }
+}
+
 private fun stickyBit(def: KeyDef) = when (def.key) {
     "ctrl" -> RexKey.CTRL
     "alt" -> RexKey.ALT
@@ -216,11 +227,6 @@ private fun RowScope.KeyButton(controller: WorkspaceController, def: KeyDef, onO
             motion(MOTION_SHORT),
             label = "key-tint",
         )
-        val icon = iconFor(def.icon)
-        if (icon != null) {
-            Icon(icon, null, Modifier.size(18.dp), tint = tint)
-        } else {
-            Text(def.label, style = MaterialTheme.typography.labelLarge, color = tint, maxLines = 1, softWrap = false)
-        }
+        KeyFace(def, tint)
     }
 }

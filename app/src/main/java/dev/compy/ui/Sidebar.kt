@@ -5,9 +5,11 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -31,6 +33,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
@@ -49,6 +53,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -70,6 +75,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -117,7 +123,21 @@ fun Sidebar(
     val selection by app.selection.collectAsStateWithLifecycle()
     var query by rememberSaveable { mutableStateOf("") }
     var searching by rememberSaveable { mutableStateOf(false) }
+    var creating by rememberSaveable { mutableStateOf(false) }
     val scheme = MaterialTheme.colorScheme
+    if (creating) {
+        NewSessionDialog(
+            servers = connections.values.toList(),
+            preferred = selection?.serverId,
+            onDismiss = { creating = false },
+            onCreated = { connection, id ->
+                creating = false
+                app.select(Selection(connection.config.id, id))
+                onOpened()
+            },
+            onMessage = onMessage,
+        )
+    }
     BackHandler(enabled = searching) {
         searching = false
         query = ""
@@ -137,6 +157,14 @@ fun Sidebar(
         ) {
             BoxWithConstraints(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
                 val pillWidth by animateDpAsState(if (searching) maxWidth else 120.dp, motion(), label = "search")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                AnimatedVisibility(
+                    !searching,
+                    enter = expandHorizontally(motion()) + fadeIn(motion(MOTION_SHORT)),
+                    exit = shrinkHorizontally(motion()) + fadeOut(motion(MOTION_SHORT)),
+                ) {
+                    RoundButton(Icons.Rounded.Add, "New session", modifier = Modifier.padding(end = 8.dp)) { creating = true }
+                }
                 ToolPill(
                     activityOn = settings.activityMode,
                     onToggleActivity = { app.updateSettings { it.copy(activityMode = !it.activityMode) } },
@@ -151,6 +179,7 @@ fun Sidebar(
                     onOpenSettings = onOpenSettings,
                     modifier = Modifier.width(pillWidth),
                 )
+                }
             }
             if (onHideSidebar != null) {
                 Spacer(Modifier.width(8.dp))
@@ -415,20 +444,17 @@ private fun ServerSection(
         }
     }
     if (creating) {
-        NewSessionDialog(onDismiss = { creating = false }) { label ->
-            creating = false
-            scope.launch {
-                try {
-                    val id = connection.createSession(label)
-                    if (id != null) {
-                        app.select(Selection(connection.config.id, id))
-                        onOpened()
-                    }
-                } catch (e: Exception) {
-                    onMessage(e.message ?: "Couldn't start a session")
-                }
-            }
-        }
+        NewSessionDialog(
+            servers = listOf(connection),
+            preferred = connection.config.id,
+            onDismiss = { creating = false },
+            onCreated = { _, id ->
+                creating = false
+                app.select(Selection(connection.config.id, id))
+                onOpened()
+            },
+            onMessage = onMessage,
+        )
     }
     if (removing) {
         AlertDialog(
@@ -446,14 +472,70 @@ private fun ServerSection(
     }
 }
 
+/** Starts a session. It's ready to confirm straight away, because naming one is optional. */
 @Composable
-private fun NewSessionDialog(onDismiss: () -> Unit, onConfirm: (String?) -> Unit) {
+private fun NewSessionDialog(
+    servers: List<ServerConnection>,
+    preferred: String?,
+    onDismiss: () -> Unit,
+    onCreated: (ServerConnection, String) -> Unit,
+    onMessage: (String) -> Unit,
+) {
     var name by remember { mutableStateOf("") }
+    var serverId by remember {
+        val connected = servers.filter { it.state.value == ConnectionState.Connected }
+        mutableStateOf((connected.firstOrNull { it.config.id == preferred } ?: connected.firstOrNull() ?: servers.firstOrNull())?.config?.id)
+    }
+    var starting by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    fun start() {
+        val connection = servers.firstOrNull { it.config.id == serverId } ?: return
+        if (starting) return
+        starting = true
+        scope.launch {
+            try {
+                val id = connection.createSession(name.ifBlank { null })
+                if (id != null) onCreated(connection, id) else onDismiss()
+            } catch (e: Exception) {
+                onMessage(e.message ?: "Couldn't start a session")
+                onDismiss()
+            }
+        }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("New session") },
-        text = { OutlinedTextField(name, { name = it }, label = { Text("Name (optional)") }, singleLine = true) },
-        confirmButton = { TextButton(onClick = { onConfirm(name.ifBlank { null }) }) { Text("Start") } },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    name, { name = it },
+                    label = { Text("Name (optional)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                    keyboardActions = KeyboardActions(onGo = { start() }),
+                    modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                )
+                if (servers.size > 1) {
+                    Text("On", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    servers.forEach { server ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { serverId = server.config.id }
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(serverId == server.config.id, null, Modifier.padding(8.dp))
+                            Text(server.config.label, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = ::start, enabled = serverId != null && !starting) { Text("Start") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }

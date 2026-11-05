@@ -34,6 +34,8 @@ data class KeyDef(
     val mods: String = "",
     /** Literal text to send for `text`. */
     val text: String = "",
+    /** Press Enter after typing `text`, so a key can run a whole command. */
+    val thenEnter: Boolean = false,
 )
 
 /** A host's colors, saved so the app looks right before it reconnects. */
@@ -68,7 +70,6 @@ data class Settings(
 
 object DefaultKeyBar {
     val catalog: List<KeyDef> = listOf(
-        KeyDef("sticky", "⌘", icon = "command", key = "super"),
         KeyDef("key", "esc", key = "escape"),
         KeyDef("sticky", "ctrl", key = "ctrl"),
         KeyDef("sticky", "opt", key = "alt"),
@@ -98,6 +99,43 @@ object DefaultKeyBar {
         KeyDef("prompt", "Previous prompt", icon = "prompt-up", key = "-1"),
         KeyDef("prompt", "Next prompt", icon = "prompt-down", key = "1"),
     )
+
+    /** A plain name and group for a key, shown in the editor. */
+    data class Info(val name: String, val group: String)
+
+    fun info(def: KeyDef): Info = when (def.label) {
+        "esc" -> Info("Escape", "Essentials")
+        "tab" -> Info("Tab", "Essentials")
+        "⏎" -> Info("Enter", "Essentials")
+        "⌫" -> Info("Backspace", "Essentials")
+        "del" -> Info("Delete", "Essentials")
+        "Paste" -> Info("Paste", "Essentials")
+        "Compose" -> Info("Compose", "Essentials")
+        "ctrl" -> Info("Control (latches)", "Modifiers")
+        "opt" -> Info("Option (latches)", "Modifiers")
+        "shift" -> Info("Shift (latches)", "Modifiers")
+        "←" -> Info("Left", "Movement")
+        "↓" -> Info("Down", "Movement")
+        "↑" -> Info("Up", "Movement")
+        "→" -> Info("Right", "Movement")
+        "home" -> Info("Home", "Movement")
+        "end" -> Info("End", "Movement")
+        "pgup" -> Info("Page up", "Movement")
+        "pgdn" -> Info("Page down", "Movement")
+        "Previous prompt" -> Info("Previous prompt", "Movement")
+        "Next prompt" -> Info("Next prompt", "Movement")
+        "^C" -> Info("Control-C", "Shortcuts")
+        "^D" -> Info("Control-D", "Shortcuts")
+        "^Z" -> Info("Control-Z", "Shortcuts")
+        "⇧⇥" -> Info("Shift-Tab", "Shortcuts")
+        "/", "|", "-", "~" -> Info("Types ${def.label}", "Symbols")
+        else -> when (def.kind) {
+            "text" -> Info("Types ${def.text.take(24)}" + if (def.thenEnter) ", then Enter" else "", "Custom")
+            else -> Info(listOf(def.mods, def.key.removePrefix("key_").removePrefix("digit_")).filter { it.isNotEmpty() }.joinToString("+"), "Custom")
+        }
+    }
+
+    val groups = listOf("Essentials", "Modifiers", "Movement", "Shortcuts", "Symbols")
 
     private fun pick(vararg labels: String) = labels.map { l -> catalog.first { it.label == l } }
 

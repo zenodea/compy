@@ -130,16 +130,18 @@ class WorkspaceController(
 
     fun press(def: KeyDef) {
         when (def.kind) {
-            "text" -> sendText(def.text)
+            "text" -> {
+                sendText(def.text)
+                if (def.thenEnter) sendKey(RexKey.ENTER)
+            }
             "key" -> {
                 val sticky = consumeSticky()
                 val mods = buildList {
                     if (def.mods.isNotEmpty()) add(def.mods)
                     if (sticky != 0) add(RexKey.modsString(sticky))
                 }.joinToString("+")
-                val letter = def.key.removePrefix("key_").takeIf { def.key.startsWith("key_") }
-                sendKey(RexKey(def.key, mods, unshifted = letter?.firstOrNull()?.code ?: 0))
-                views[target()]?.let { /* typing returns the view to the bottom of its output */ }
+                val character = def.key.takeIf { it.startsWith("key_") || it.startsWith("digit_") }?.substringAfter('_')
+                sendKey(RexKey(def.key, mods, unshifted = character?.firstOrNull()?.code ?: 0))
             }
             "paste" -> clipboardText()?.let { paste(it) }
             "prompt" -> focusedView()?.jumpPrompt(def.key.toIntOrNull() ?: return)

@@ -22,10 +22,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.ArrowDownward
-import androidx.compose.material.icons.rounded.ArrowUpward
-import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -39,7 +35,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -300,111 +295,4 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
             confirmButton = { TextButton(onClick = { showLicenses = false }) { Text("Close") } },
         )
     }
-}
-
-@Composable
-private fun KeyBarEditor(app: AppState, onBack: () -> Unit) {
-    val settings by app.settings.collectAsStateWithLifecycle()
-    val pages = settings.keyBarPages
-    var addingTo by remember { mutableStateOf<Int?>(null) }
-    var customFor by remember { mutableStateOf<Int?>(null) }
-
-    fun setPages(change: (List<List<KeyDef>>) -> List<List<KeyDef>>) {
-        app.updateSettings { it.copy(keyBarPages = change(it.keyBarPages)) }
-    }
-
-    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        Header("Key bar", onBack)
-        LazyColumn(Modifier.navigationBarsPadding()) {
-            pages.forEachIndexed { pageIndex, page ->
-                item(key = "header$pageIndex") {
-                    Row(Modifier.fillMaxWidth().padding(start = 16.dp, top = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("Page ${pageIndex + 1}", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                        TextButton(onClick = { addingTo = pageIndex }) { Text("Add key") }
-                        TextButton(onClick = { customFor = pageIndex }) { Text("Custom") }
-                        if (pages.size > 1) {
-                            TextButton(onClick = { setPages { it.filterIndexed { i, _ -> i != pageIndex } } }) { Text("Remove") }
-                        }
-                    }
-                }
-                itemsIndexed(page, key = { i, def -> "p$pageIndex-$i-${def.label}" }) { i, def ->
-                    ListItem(
-                        headlineContent = { Text(def.label) },
-                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                        trailingContent = {
-                            Row {
-                                IconButton(enabled = i > 0, onClick = {
-                                    setPages { all -> all.mapIndexed { p, keys -> if (p == pageIndex) keys.swapped(i, i - 1) else keys } }
-                                }) { Icon(Icons.Rounded.ArrowUpward, "Move earlier") }
-                                IconButton(enabled = i < page.lastIndex, onClick = {
-                                    setPages { all -> all.mapIndexed { p, keys -> if (p == pageIndex) keys.swapped(i, i + 1) else keys } }
-                                }) { Icon(Icons.Rounded.ArrowDownward, "Move later") }
-                                IconButton(onClick = {
-                                    setPages { all -> all.mapIndexed { p, keys -> if (p == pageIndex) keys.filterIndexed { k, _ -> k != i } else keys } }
-                                }) { Icon(Icons.Rounded.Close, "Remove") }
-                            }
-                        },
-                    )
-                }
-            }
-            item(key = "footer") {
-                HorizontalDivider(Modifier.padding(top = 12.dp))
-                Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { setPages { it + listOf(emptyList()) } }) {
-                        Icon(Icons.Rounded.Add, null, Modifier.size(18.dp))
-                        Text("Add page", Modifier.padding(start = 4.dp))
-                    }
-                    TextButton(onClick = { setPages { DefaultKeyBar.pages } }) { Text("Reset to default") }
-                }
-            }
-        }
-    }
-    addingTo?.let { page ->
-        AlertDialog(
-            onDismissRequest = { addingTo = null },
-            title = { Text("Add a key") },
-            text = {
-                LazyColumn {
-                    itemsIndexed(DefaultKeyBar.catalog) { _, def ->
-                        ListItem(
-                            headlineContent = { Text(def.label) },
-                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                            modifier = Modifier.clickable {
-                                setPages { all -> all.mapIndexed { p, keys -> if (p == page) keys + def else keys } }
-                                addingTo = null
-                            },
-                        )
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { addingTo = null }) { Text("Cancel") } },
-        )
-    }
-    customFor?.let { page ->
-        var label by remember { mutableStateOf("") }
-        var text by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { customFor = null },
-            title = { Text("Custom key") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(label, { label = it }, label = { Text("Label") }, singleLine = true)
-                    OutlinedTextField(text, { text = it }, label = { Text("Text it sends") })
-                }
-            },
-            confirmButton = {
-                TextButton(enabled = label.isNotBlank() && text.isNotEmpty(), onClick = {
-                    setPages { all -> all.mapIndexed { p, keys -> if (p == page) keys + KeyDef("text", label.trim(), text = text) else keys } }
-                    customFor = null
-                }) { Text("Add") }
-            },
-            dismissButton = { TextButton(onClick = { customFor = null }) { Text("Cancel") } },
-        )
-    }
-}
-
-private fun <T> List<T>.swapped(a: Int, b: Int): List<T> = toMutableList().also {
-    val t = it[a]
-    it[a] = it[b]
-    it[b] = t
 }

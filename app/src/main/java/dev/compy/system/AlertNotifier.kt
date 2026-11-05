@@ -193,6 +193,25 @@ class AlertNotifier(private val context: Context, private val app: AppState) {
         manager.cancel(block, NOTIFICATION_ID)
     }
 
+    /**
+     * Confirms a reply. Android keeps showing a notification that was replied to, with a spinner,
+     * until the app posts it again, so cancelling alone leaves it stuck. This replaces it quietly
+     * and lets it time out by itself.
+     */
+    fun replySent(block: String, text: String) {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
+        val notification = NotificationCompat.Builder(context, AlertChannels.FINISHED)
+            .setSmallIcon(R.drawable.ic_tile)
+            .setContentTitle("Reply sent")
+            .setContentText(text)
+            .setSilent(true)
+            .setAutoCancel(true)
+            .setTimeoutAfter(REPLY_CONFIRM_MS)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .build()
+        runCatching { manager.notify(block, NOTIFICATION_ID, notification) }
+    }
+
     /** Reports that a reply couldn't be sent, keeping the notification so nothing gets lost. */
     fun replyFailed(block: String, serverId: String, sessionId: String, reason: String) {
         postNotification(block, AlertChannels.NEEDS_YOU, "Couldn't send your reply", reason, "Tap to open the pane", serverId, sessionId, urgent = false)
@@ -200,6 +219,7 @@ class AlertNotifier(private val context: Context, private val app: AppState) {
 
     private companion object {
         const val NOTIFICATION_ID = 2
+        const val REPLY_CONFIRM_MS = 3_000L
     }
 }
 
@@ -217,7 +237,7 @@ class AlertReplyReceiver : BroadcastReceiver() {
             try {
                 val connection = app.connections.value[server] ?: error("This server is no longer in Compy")
                 connection.sendReply(session, block, text)
-                app.notifier.cancel(block)
+                app.notifier.replySent(block, text)
             } catch (e: Exception) {
                 app.notifier.replyFailed(block, server, session, e.message ?: "Compy isn't connected")
             } finally {
