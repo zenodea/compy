@@ -20,7 +20,8 @@ In Compy, tap **Scan pairing code** and scan what it shows, or type the `ts.net`
 - **Sizes:** each session either fits terminals to this screen while Compy is open, or keeps another device's size with pan and zoom.
 - **Servers:** all your servers in one list. Activity view groups panes by what needs you.
 - **Input:** direct typing, a customizable key bar, a composer with voice typing, and hardware keyboard and mouse support.
-- **Android:** Material You, predictive back, a share target for text, app shortcuts, a home screen widget and a Quick Settings tile.
+- **Look:** the whole app takes its colors from the Rex host's terminal theme, or from your wallpaper if you prefer.
+- **Android:** predictive back, a share target for text, app shortcuts, a home screen widget and a Quick Settings tile.
 - **Privacy:** no telemetry. Biometric lock is on when the device supports it, and screenshot blocking is optional.
 
 Compy only stays connected while it's open, so the widget and tile show the last known state, with its age.
@@ -44,6 +45,12 @@ rex server run --listen http://127.0.0.1:18765 --allow-anonymous
 ```
 
 `--allow-anonymous` gives every connection full access, so only use it on loopback.
+
+## Program icons
+
+Compy ships open icons from [Simple Icons](https://simpleicons.org), listed in `app/src/main/assets/icons/ATTRIBUTION.md`. To change the list, edit and run `scripts/generate-program-icons.py`.
+
+If you have Rex installed on a Mac, `scripts/import-rex-icons.sh` renders its icons into `local-icons/` for your own debug and QA builds. Those icons belong to Rex's makers, so that folder is ignored by Git and left out of release builds. Don't commit or redistribute it.
 
 ## Releases
 
