@@ -23,7 +23,7 @@ class GhosttyTerminal private constructor(private var handle: Long) {
     fun scroll(delta: Int) = synchronized(lock) { if (handle != 0L) nativeScroll(handle, delta) }
     fun scrollToBottom() = synchronized(lock) { if (handle != 0L) nativeScrollToBottom(handle) }
 
-    /** Colours are 0xRRGGBB with a non-zero alpha; 0 clears back to the built-in value. */
+    /** Colors are 0xRRGGBB with a non-zero alpha; 0 clears back to the built-in value. */
     fun setColors(fg: Int, bg: Int, cursor: Int, palette: IntArray?) = synchronized(lock) {
         if (handle != 0L) nativeSetColors(handle, fg, bg, cursor, palette)
     }

@@ -60,7 +60,7 @@ internal object BoxDrawing {
     fun handles(cp: Int): Boolean =
         (cp in 0x2500..0x257F && (cp in table || cp in 0x256D..0x2570 || cp in 0x2571..0x2573)) || cp in 0x2580..0x2595
 
-    /** Draws the character in the given cell using [paint]'s colour. */
+    /** Draws the character in the given cell using [paint]'s color. */
     fun draw(canvas: Canvas, cp: Int, x: Float, y: Float, w: Float, h: Float, paint: Paint, rect: RectF, path: Path) {
         paint.style = Paint.Style.FILL
         val thin = maxOf(1f, Math.round(h / 16f).toFloat())

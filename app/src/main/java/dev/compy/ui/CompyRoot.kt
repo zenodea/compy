@@ -1,6 +1,10 @@
 package dev.compy.ui
 
-import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
+import androidx.compose.animation.core.Animatable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.graphicsLayer
+import kotlinx.coroutines.CancellationException
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.animation.AnimatedVisibility
@@ -17,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
@@ -26,7 +31,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -88,6 +95,26 @@ private fun MainLayout(app: AppState, onOpenSettings: () -> Unit, onAddServer: (
     val selection by app.selection.collectAsStateWithLifecycle()
     val connection = selection?.let { connections[it.serverId] }
     val sessionId = selection?.sessionId
+    val alertScope = rememberCoroutineScope()
+    val alertHost = remember { SnackbarHostState() }
+    // Tell people when something elsewhere needs them, unless they're already looking at it.
+    connections.values.forEach { c ->
+        LaunchedEffect(c) {
+            c.alerts.collect { alert ->
+                val focused = alert.sessionId == app.selection.value?.sessionId && app.foreground.value &&
+                    c.views.value[alert.sessionId]?.activeWindow?.focusedBlockId == alert.blockId
+                if (!focused) {
+                    alertScope.launch {
+                        val result = alertHost.showSnackbar(alert.text, actionLabel = "Open", duration = SnackbarDuration.Long)
+                        if (result == SnackbarResult.ActionPerformed) {
+                            app.requestOpen(dev.compy.Selection(alert.serverId, alert.sessionId))
+                            c.focusBlock(alert.sessionId, alert.blockId)
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // The session may be ended from another device while it's open here.
     if (connection != null && sessionId != null) {
@@ -103,13 +130,23 @@ private fun MainLayout(app: AppState, onOpenSettings: () -> Unit, onAddServer: (
         val sidebarWidth = if (maxWidth < 840.dp) 280.dp else 320.dp
         var sidebarOpen by rememberSaveable { mutableStateOf(true) }
         var showList by rememberSaveable { mutableStateOf(true) }
+        LaunchedEffect(Unit) { app.openRequests.collect { showList = false } }
         LaunchedEffect(sessionId) { if (sessionId == null) showList = true }
         if (compact) {
             val inWorkspace = !showList && connection != null && sessionId != null
-            BackHandler(enabled = inWorkspace) { showList = true }
-            if (inWorkspace) {
-                Workspace(app, connection!!, sessionId!!, compact = true, onShowSidebar = { showList = true }, onMessage = onMessage)
-            } else {
+            val back = remember { Animatable(0f) }
+            // The workspace follows the back gesture, showing the session list underneath.
+            PredictiveBackHandler(enabled = inWorkspace) { progress ->
+                try {
+                    progress.collect { back.snapTo(it.progress) }
+                    showList = true
+                    back.snapTo(0f)
+                } catch (e: CancellationException) {
+                    back.animateTo(0f)
+                    throw e
+                }
+            }
+            if (!inWorkspace || back.value > 0f) {
                 Sidebar(
                     app, Modifier.fillMaxSize(),
                     onOpenSettings = onOpenSettings,
@@ -117,6 +154,22 @@ private fun MainLayout(app: AppState, onOpenSettings: () -> Unit, onAddServer: (
                     onOpened = { showList = false },
                     onMessage = onMessage,
                 )
+            }
+            if (inWorkspace) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            val p = back.value
+                            translationX = size.width * 0.25f * p
+                            scaleX = 1f - 0.1f * p
+                            scaleY = 1f - 0.1f * p
+                            shape = RoundedCornerShape(28.dp * p)
+                            clip = p > 0f
+                        },
+                ) {
+                    Workspace(app, connection!!, sessionId!!, compact = true, onShowSidebar = { showList = true }, onMessage = onMessage)
+                }
             }
         } else {
             Row(Modifier.fillMaxSize()) {
@@ -142,6 +195,7 @@ private fun MainLayout(app: AppState, onOpenSettings: () -> Unit, onAddServer: (
                 }
             }
         }
+        SnackbarHost(alertHost, Modifier.align(Alignment.TopCenter).statusBarsPadding()) { Snackbar(it) }
     }
 }
 

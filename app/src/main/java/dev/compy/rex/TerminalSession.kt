@@ -124,7 +124,7 @@ class TerminalSession(
         if (state != State.Closed) state = State.Reconnecting
     }
 
-    /** Applies the colours chosen in Compy, or null to follow what the server says. */
+    /** Applies the colors chosen in Compy, or null to follow what the server says. */
     fun setLocalTheme(colors: TerminalColors?) {
         localTheme = colors
         applyColors()
@@ -333,7 +333,7 @@ class TerminalSession(
     }
 }
 
-/** Default colours for a terminal. Each is 0xFFRRGGBB, or 0 for the built-in value. */
+/** Default colors for a terminal. Each is 0xFFRRGGBB, or 0 for the built-in value. */
 data class TerminalColors(
     val foreground: Int,
     val background: Int,
@@ -360,7 +360,7 @@ data class TerminalColors(
             return TerminalColors(hex(msg["foreground"].str()), hex(msg["background"].str()), hex(msg["cursor"].str()), palette)
         }
 
-        /** The standard xterm 256-colour palette. */
+        /** The standard xterm 256-color palette. */
         val BUILTIN_PALETTE: IntArray = IntArray(256).also { p ->
             val base = intArrayOf(
                 0x000000, 0xCC0000, 0x4E9A06, 0xC4A000, 0x3465A4, 0x75507B, 0x06989A, 0xD3D7CF,

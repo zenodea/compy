@@ -42,7 +42,7 @@ class MainActivity : FragmentActivity() {
     private fun handleIntent(intent: Intent?) {
         val server = intent?.getStringExtra(EXTRA_SERVER) ?: return
         val session = intent.getStringExtra(EXTRA_SESSION) ?: return
-        state.select(Selection(server, session))
+        state.requestOpen(Selection(server, session))
     }
 
     companion object {

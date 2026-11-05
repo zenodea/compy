@@ -105,7 +105,7 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
     val settings by app.settings.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var themeMenu by remember { mutableStateOf(false) }
-    var showLicences by remember { mutableStateOf(false) }
+    var showLicenses by remember { mutableStateOf(false) }
     val update: ((Settings) -> Settings) -> Unit = { app.updateSettings(it) }
 
     val fontPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
@@ -141,13 +141,13 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
                     }
                 }
             }
-            item { SwitchRow("Wallpaper colours", "Use Material You colours from your wallpaper", settings.dynamicColor) { v -> update { it.copy(dynamicColor = v) } } }
+            item { SwitchRow("Wallpaper colors", "Use Material You colors from your wallpaper", settings.dynamicColor) { v -> update { it.copy(dynamicColor = v) } } }
             item { SwitchRow("AMOLED black", "Pure black backgrounds in dark theme", settings.amoled) { v -> update { it.copy(amoled = v) } } }
 
             item { Section("Terminal") }
             item {
                 ListItem(
-                    headlineContent = { Text("Colour theme") },
+                    headlineContent = { Text("Color theme") },
                     supportingContent = { Text(TerminalThemes.options.firstOrNull { it.id == settings.terminalTheme }?.name.orEmpty()) },
                     modifier = Modifier.clickable { themeMenu = true },
                     trailingContent = {
@@ -228,23 +228,23 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
             }
             item {
                 ListItem(
-                    headlineContent = { Text("Open source licences") },
-                    modifier = Modifier.clickable { showLicences = true },
+                    headlineContent = { Text("Open source licenses") },
+                    modifier = Modifier.clickable { showLicenses = true },
                 )
             }
         }
     }
-    if (showLicences) {
+    if (showLicenses) {
         AlertDialog(
-            onDismissRequest = { showLicences = false },
-            title = { Text("Open source licences") },
+            onDismissRequest = { showLicenses = false },
+            title = { Text("Open source licenses") },
             text = {
                 Text(
                     "Compy: Apache-2.0\nlibghostty-vt: MIT\nJetBrains Mono and Nerd Fonts: SIL Open Font License 1.1\n" +
                         "AndroidX and Compose: Apache-2.0\nKotlin and kotlinx: Apache-2.0\nOkHttp: Apache-2.0\nZXing: Apache-2.0",
                 )
             },
-            confirmButton = { TextButton(onClick = { showLicences = false }) { Text("Close") } },
+            confirmButton = { TextButton(onClick = { showLicenses = false }) { Text("Close") } },
         )
     }
 }

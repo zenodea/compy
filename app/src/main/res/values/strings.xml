@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_description">The last known status of your Rex sessions</string>
+    <string name="tile_label">Compy</string>
+    <string name="share_label">Paste into a terminal</string>
+</resources>

@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -86,7 +87,7 @@ fun StatusDot(blockIds: List<String>, statuses: Map<String, ProgramStatus>, atte
     val all = blockIds.mapNotNull { statuses[it] }
     val scheme = MaterialTheme.colorScheme
     when {
-        all.any { it.isBlocked } -> Dot(scheme.tertiary, modifier)
+        all.any { it.isBlocked } -> Dot(BlockedColor, modifier)
         all.any { it.isError } -> Dot(scheme.error, modifier)
         all.any { it.isWorking } -> {
             val pulse by rememberInfiniteTransition(label = "working").animateFloat(
@@ -100,8 +101,10 @@ fun StatusDot(blockIds: List<String>, statuses: Map<String, ProgramStatus>, atte
 
 @Composable
 private fun Dot(color: Color, modifier: Modifier = Modifier) {
-    Box(modifier.padding(end = 2.dp).size(8.dp).clip(CircleShape).background(color))
+    Box(modifier.size(10.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surface).padding(1.5.dp).clip(CircleShape).background(color))
 }
+
+private val BlockedColor = Color(0xFFF59E0B)
 
 private enum class Priority(val title: String) {
     Blocked("Needs you"), Error("Errors"), Working("Working"), Done("Finished"), Quiet("Quiet")
@@ -213,6 +216,7 @@ private fun ServerSection(
     val views by connection.views.collectAsStateWithLifecycle()
     val statuses by connection.statuses.collectAsStateWithLifecycle()
     val attention by connection.attention.collectAsStateWithLifecycle()
+    val titles by connection.titles.collectAsStateWithLifecycle()
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf(false) }
@@ -266,9 +270,9 @@ private fun ServerSection(
         sessions.forEach { session ->
             val view = views[session.id]
             val matches = query.isBlank() || session.label.contains(query, ignoreCase = true) ||
-                view?.windows?.any { it.label.contains(query, ignoreCase = true) } == true
+                view?.windows?.any { it.displayTitle(titles).contains(query, ignoreCase = true) } == true
             if (matches) {
-                SessionGroup(connection, session, view, selection, query, statuses, attention, session.id in collapsed, app, onOpened, onMessage)
+                SessionGroup(connection, session, view, selection, query, statuses, attention, titles, session.id in collapsed, app, onOpened, onMessage)
             }
         }
     }
@@ -333,6 +337,7 @@ private fun SessionGroup(
     query: String,
     statuses: Map<String, ProgramStatus>,
     attention: Set<String>,
+    titles: Map<String, String>,
     collapsed: Boolean,
     app: AppState,
     onOpened: () -> Unit,
@@ -371,10 +376,11 @@ private fun SessionGroup(
     }
     if (collapsed) return
     view?.windows?.forEach { window ->
-        if (query.isNotBlank() && !window.label.contains(query, true) && !session.label.contains(query, true)) return@forEach
+        val title = window.displayTitle(titles)
+        if (query.isNotBlank() && !title.contains(query, true) && !session.label.contains(query, true)) return@forEach
         val selected = selection?.serverId == connection.config.id && selection.sessionId == session.id && view.activeWindow?.id == window.id
         WindowRow(
-            title = window.label.ifEmpty { "Window" },
+            title = title,
             subtitle = null,
             paneCount = window.blocks.size,
             blockIds = window.blocks.map { it.id },
@@ -384,6 +390,7 @@ private fun SessionGroup(
             onClick = {
                 app.select(Selection(connection.config.id, session.id))
                 connection.focusWindow(session.id, window.id)
+                app.recordRecent(connection.config.id, session.id, title)
                 onOpened()
             },
         )
@@ -423,7 +430,7 @@ private fun WindowRow(
                     Icon(Icons.Filled.Terminal, null, Modifier.size(18.dp), tint = scheme.onTertiaryContainer)
                 }
             }
-            StatusDot(blockIds, statuses, attention, Modifier.padding(start = 26.dp))
+            StatusDot(blockIds, statuses, attention, Modifier.offset(x = 3.dp, y = (-3).dp))
         }
         Column(Modifier.padding(start = 10.dp).weight(1f)) {
             Text(title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -452,11 +459,14 @@ private fun ActivityList(
     val rows = mutableListOf<PaneRow>()
     val attentionAll = mutableSetOf<String>()
     val statusAll = mutableMapOf<String, ProgramStatus>()
+    val titlesAll = mutableMapOf<String, String>()
     for (connection in servers) {
         val sessions by connection.sessions.collectAsState()
         val views by connection.views.collectAsState()
         val statuses by connection.statuses.collectAsState()
         val attention by connection.attention.collectAsState()
+        val titles by connection.titles.collectAsState()
+        titlesAll += titles
         attentionAll += attention
         statusAll += statuses
         for (session in sessions) {
@@ -490,7 +500,7 @@ private fun ActivityList(
             )
             group.forEach { row ->
                 WindowRow(
-                    title = row.window.label.ifEmpty { row.block.label.ifEmpty { "Pane" } },
+                    title = titlesAll[row.block.id] ?: row.window.displayTitle(titlesAll),
                     subtitle = row.status?.message ?: row.status?.app ?: row.session.label,
                     paneCount = 1,
                     blockIds = listOf(row.block.id),

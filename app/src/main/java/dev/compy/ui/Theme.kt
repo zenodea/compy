@@ -3,6 +3,7 @@ package dev.compy.ui
 import android.content.Context
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
@@ -11,6 +12,7 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
@@ -53,8 +55,10 @@ fun CompyTheme(settings: Settings, content: @Composable () -> Unit) {
             large = RoundedCornerShape(24.dp),
             extraLarge = RoundedCornerShape(32.dp),
         ),
-        content = content,
-    )
+    ) {
+        // Screens draw on their own backgrounds, so set the default text color for all of them.
+        CompositionLocalProvider(LocalContentColor provides scheme.onSurface, content = content)
+    }
 }
 
 private fun colorSchemeFor(context: Context, dark: Boolean, dynamic: Boolean, amoled: Boolean): ColorScheme {
@@ -76,7 +80,7 @@ private fun colorSchemeFor(context: Context, dark: Boolean, dynamic: Boolean, am
     )
 }
 
-/** The terminal themes Compy offers. "rex" uses whatever colours the server says. */
+/** The terminal themes Compy offers. "rex" uses whatever colors the server says. */
 object TerminalThemes {
     data class Option(val id: String, val name: String)
 

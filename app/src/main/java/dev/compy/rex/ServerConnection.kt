@@ -3,7 +3,10 @@ package dev.compy.rex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -26,6 +29,9 @@ sealed interface ConnectionState {
     data object Connected : ConnectionState
     data class Offline(val reason: String) : ConnectionState
 }
+
+/** Something a program wants the person to know, with where to find it. */
+data class Alert(val serverId: String, val sessionId: String, val blockId: String, val text: String)
 
 /** A saved server's address and name. */
 data class ServerConfig(val id: String, val label: String, val url: String)
@@ -69,6 +75,14 @@ class ServerConnection(
 
     private val _serverVersion = MutableStateFlow<String?>(null)
     val serverVersion: StateFlow<String?> = _serverVersion.asStateFlow()
+
+    /** Things worth telling someone about while the app is open. */
+    private val _alerts = MutableSharedFlow<Alert>(extraBufferCapacity = 16)
+    val alerts: SharedFlow<Alert> = _alerts.asSharedFlow()
+
+    /** Text a program copied with OSC 52. */
+    private val _clipboard = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val clipboard: SharedFlow<String> = _clipboard.asSharedFlow()
 
     @Volatile private var control: RexControl? = null
     private var reconnectToken: String? = null
@@ -212,7 +226,10 @@ class ServerConnection(
         for (window in view.windows) for (block in window.blocks) {
             if (block.creator.endsWith(".terminal") && block.id !in statusRead) {
                 statusRead += block.id
-                scope.launch { readStatus(sessionId, block.id) }
+                scope.launch {
+                    readStatus(sessionId, block.id)
+                    readTitle(sessionId, block.id)
+                }
             }
         }
         // The server's list only names sessions, so keep labels current from the view too.
@@ -237,6 +254,20 @@ class ServerConnection(
         } catch (_: Exception) {
             statusRead -= blockId
         }
+    }
+
+    private suspend fun readTitle(sessionId: String, blockId: String) {
+        val result = runCatching {
+            control?.call(
+                "com.superlogical.terminal.title",
+                buildJsonObject {
+                    put("session_id", sessionId)
+                    put("block_id", blockId)
+                },
+            ).obj()
+        }.getOrNull()
+        val title = result?.get("title").str()?.takeIf { it.isNotBlank() } ?: return
+        _titles.update { it + (blockId to title) }
     }
 
     private fun setStatus(blockId: String, status: ProgramStatus?) {
@@ -285,21 +316,38 @@ class ServerConnection(
                 _attention.update { it - id }
                 terminals.remove(id)?.stop()
             }
-            "block_event" -> handleBlockEvent(payload ?: return)
+            "block_event" -> handleBlockEvent(sessionId, payload ?: return)
         }
     }
 
-    private fun handleBlockEvent(payload: JsonObject) {
+    private fun handleBlockEvent(sessionId: String, payload: JsonObject) {
         val block = payload["block_id"].str() ?: return
         val fields = payload["payload"].obj()
         when (payload["name"].str()) {
             "program_status_changed" -> {
                 val status = parseStatusRecord(fields?.get("record")) ?: return
+                val previous = _statuses.value[block]
                 setStatus(block, status)
                 if (status.isDone || status.isBlocked || status.isError) markAttention(block)
+                if (status.isBlocked && previous?.isBlocked != true) {
+                    val who = status.app ?: "A program"
+                    val what = when (status.kind) {
+                        "permission" -> "needs your permission"
+                        "question" -> "has a question"
+                        "auth" -> "needs a password"
+                        else -> "needs you"
+                    }
+                    _alerts.tryEmit(Alert(config.id, sessionId, block, "$who $what"))
+                }
             }
             "program_status_removed" -> setStatus(block, null)
-            "bell", "desktop_notification" -> markAttention(block)
+            "bell" -> markAttention(block)
+            "desktop_notification" -> {
+                markAttention(block)
+                val text = fields?.get("body").str() ?: fields?.get("title").str()
+                if (!text.isNullOrBlank()) _alerts.tryEmit(Alert(config.id, sessionId, block, text))
+            }
+            "clipboard_written" -> fields?.get("text").str()?.let { _clipboard.tryEmit(it) }
             "title_changed" -> {
                 val title = fields?.get("title").str() ?: return
                 _titles.update { it + (block to title) }
@@ -366,6 +414,17 @@ class ServerConnection(
     /** Stops streaming a block that's no longer on screen. */
     fun releaseTerminal(blockId: String) {
         terminals.remove(blockId)?.stop()
+    }
+
+    /** Pastes into a block that may not be on screen, attaching to its session first. */
+    fun pasteInto(sessionId: String, blockId: String, text: String, onError: (String) -> Unit = {}) = act(onError) { c ->
+        ensureAttached(sessionId)
+        c.call("block.event", ids(sessionId, blockId) {
+            put("event", buildJsonObject {
+                put("type", "paste")
+                put("payload", buildJsonObject { put("text", text) })
+            })
+        })
     }
 
     private fun ids(sessionId: String, blockId: String, extra: JsonObjectBuilder.() -> Unit = {}) =

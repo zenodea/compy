@@ -1,5 +1,7 @@
 package dev.compy
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
@@ -11,14 +13,21 @@ import dev.compy.data.SavedServer
 import dev.compy.data.Settings
 import dev.compy.data.SettingsStore
 import dev.compy.rex.ServerConfig
+import dev.compy.system.Shortcuts
+import dev.compy.system.StatusPublisher
 import dev.compy.rex.ServerConnection
 import dev.compy.term.TerminalFonts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -68,6 +77,10 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
     private val _fonts = MutableStateFlow(TerminalFonts.bundled(context))
     val fonts: StateFlow<TerminalFonts> = _fonts.asStateFlow()
 
+    /** Fires when something outside the sidebar, such as a shortcut, opens a session. */
+    private val _openRequests = MutableSharedFlow<Selection>(replay = 1, extraBufferCapacity = 1)
+    val openRequests: SharedFlow<Selection> = _openRequests.asSharedFlow()
+
     private var pauseJob: Job? = null
     private var leftAt = 0L
 
@@ -80,6 +93,23 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
             }
         }
         ProcessLifecycleOwner.get().lifecycle.addObserver(this)
+        StatusPublisher(context, this).start()
+        scope.launch {
+            connections.collectLatest { map ->
+                coroutineScope {
+                    map.values.forEach { c ->
+                        launch {
+                            c.clipboard.collect { text ->
+                                if (_foreground.value) {
+                                    context.getSystemService(ClipboardManager::class.java)
+                                        .setPrimaryClip(ClipData.newPlainText("Terminal", text))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         context.getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(
             object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
@@ -110,6 +140,16 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
 
     fun select(selection: Selection?) {
         _selection.value = selection
+    }
+
+    fun requestOpen(selection: Selection) {
+        _selection.value = selection
+        _openRequests.tryEmit(selection)
+    }
+
+    /** Keeps the launcher's long-press menu pointing at recently used windows. */
+    fun recordRecent(serverId: String, sessionId: String, title: String) {
+        Shortcuts.publish(context, serverId, sessionId, title)
     }
 
     fun unlock() {

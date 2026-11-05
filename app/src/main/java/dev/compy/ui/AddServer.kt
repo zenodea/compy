@@ -92,7 +92,7 @@ internal fun normalizeServerUrl(input: String, allowCleartext: Boolean): Result<
 
 internal fun defaultLabel(url: String): String =
     url.substringAfter("://").substringBefore('/').substringBefore(':').let { host ->
-        // An IP address is more recognisable whole; a host name reads better as its first part.
+        // An IP address is more recognizable whole; a host name reads better as its first part.
         if (host.firstOrNull()?.isDigit() == true) host else host.substringBefore('.')
     }.ifEmpty { "Rex" }
 

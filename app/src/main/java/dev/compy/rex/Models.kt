@@ -57,6 +57,18 @@ data class WindowView(
     val layers: List<LayerView>,
 ) {
     val blocks: List<BlockInfo> get() = layers.flatMap { it.blocks }
+
+    /** The window's label, unless Rex generated it, when the program's own title says more. */
+    fun displayTitle(titles: Map<String, String>): String {
+        val generated = label.isEmpty() || GENERATED_LABEL.matches(label)
+        if (!generated) return label
+        val block = focusedBlockId ?: blocks.firstOrNull()?.id
+        return block?.let { titles[it] } ?: blocks.firstOrNull()?.label?.ifEmpty { null } ?: "Window"
+    }
+
+    private companion object {
+        val GENERATED_LABEL = Regex("Window [0-9a-f]{8}")
+    }
 }
 
 data class SessionView(

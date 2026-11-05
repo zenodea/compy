@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -31,8 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DashboardCustomize
-import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.KeyboardHide
@@ -64,6 +64,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -222,6 +224,7 @@ private fun CompactTopBar(
     onArrange: () -> Unit,
     onMessage: (String) -> Unit,
 ) {
+    val titles by controller.connection.titles.collectAsStateWithLifecycle()
     Row(
         Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -229,7 +232,7 @@ private fun CompactTopBar(
         IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Sessions") }
         Column(Modifier.weight(1f)) {
             Text(
-                window?.label?.ifEmpty { null } ?: view?.label.orEmpty(),
+                window?.displayTitle(titles) ?: view?.label.orEmpty(),
                 style = MaterialTheme.typography.titleSmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -429,6 +432,7 @@ private fun WindowPills(controller: WorkspaceController, view: SessionView, onMe
     val connection = controller.connection
     val statuses by connection.statuses.collectAsStateWithLifecycle()
     val attention by connection.attention.collectAsStateWithLifecycle()
+    val titles by connection.titles.collectAsStateWithLifecycle()
     var menuFor by remember { mutableStateOf<String?>(null) }
     var renaming by remember { mutableStateOf<WindowView?>(null) }
     LazyRow(
@@ -450,11 +454,11 @@ private fun WindowPills(controller: WorkspaceController, view: SessionView, onMe
                     Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                         StatusDot(window.blocks.map { it.id }, statuses, attention)
                         Text(
-                            window.label.ifEmpty { "Window" },
+                            window.displayTitle(titles),
                             style = MaterialTheme.typography.labelMedium,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(start = 4.dp).width(IntrinsicLabelWidth),
+                            modifier = Modifier.padding(start = 4.dp).widthIn(max = PillLabelMaxWidth),
                         )
                     }
                 }
@@ -488,7 +492,7 @@ private fun WindowPills(controller: WorkspaceController, view: SessionView, onMe
     }
 }
 
-private val IntrinsicLabelWidth = 96.dp
+private val PillLabelMaxWidth = 120.dp
 
 /** A pop-up editor with normal keyboard features, for long prompts and voice typing. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -496,12 +500,14 @@ private val IntrinsicLabelWidth = 96.dp
 private fun ComposerSheet(controller: WorkspaceController, sendsEnter: Boolean, onClose: () -> Unit) {
     var text by rememberSaveable { mutableStateOf("") }
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
     ModalBottomSheet(onDismissRequest = onClose, sheetState = sheet) {
         Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 16.dp).imePadding()) {
             OutlinedTextField(
                 value = text,
                 onValueChange = { text = it },
-                modifier = Modifier.fillMaxWidth().heightIn(min = 140.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 140.dp).focusRequester(focus),
                 label = { Text("Message for this pane") },
             )
             Spacer(Modifier.size(8.dp))
@@ -526,6 +532,7 @@ private fun ComposerSheet(controller: WorkspaceController, sendsEnter: Boolean, 
 @Composable
 private fun WindowOverview(controller: WorkspaceController, view: SessionView, onClose: () -> Unit, onMessage: (String) -> Unit) {
     val connection = controller.connection
+    val titles by connection.titles.collectAsStateWithLifecycle()
     androidx.activity.compose.BackHandler(onBack = onClose)
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceContainerLowest) {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(16.dp)) {
@@ -560,9 +567,9 @@ private fun WindowOverview(controller: WorkspaceController, view: SessionView, o
                             WindowThumbnail(controller, window, Modifier.fillMaxSize())
                         }
                         Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.DashboardCustomize, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Icon(Icons.Filled.Terminal, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text(
-                                window.label.ifEmpty { "Window" },
+                                window.displayTitle(titles),
                                 Modifier.padding(start = 6.dp).weight(1f),
                                 style = MaterialTheme.typography.labelLarge,
                                 maxLines = 1,
