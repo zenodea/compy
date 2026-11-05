@@ -15,9 +15,11 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: android-actions/setup-android@v3
       - name: Install SDK parts
-        run: sdkmanager "platforms;android-37.0" "ndk;27.1.12297006" "cmake;3.22.1"
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses > /dev/null || true
+          "$sdkmanager" "platforms;android-37.0" "ndk;27.1.12297006" "cmake;3.22.1"
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
