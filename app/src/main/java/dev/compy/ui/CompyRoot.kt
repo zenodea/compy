@@ -4,15 +4,14 @@ import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.layout
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -21,8 +20,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -43,6 +43,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -200,7 +201,9 @@ private fun MainLayout(
                     throw e
                 }
             }
-            if (position.value < 1f) {
+            val listShown by remember { derivedStateOf { position.value < 1f } }
+            val sliding by remember { derivedStateOf { position.value > 0f } }
+            if (listShown) {
                 Box(
                     Modifier
                         .fillMaxSize()
@@ -220,7 +223,7 @@ private fun MainLayout(
             }
             val workspaceConnection = shownConnection
             val workspaceSession = shownSession
-            if ((inWorkspace || position.value > 0f) && workspaceConnection != null && workspaceSession != null) {
+            if ((inWorkspace || sliding) && workspaceConnection != null && workspaceSession != null) {
                 Box(
                     Modifier
                         .fillMaxSize()
@@ -235,24 +238,47 @@ private fun MainLayout(
                 }
             }
         } else {
-            Row(Modifier.fillMaxSize()) {
-                AnimatedVisibility(
-                    sidebarOpen,
-                    enter = expandHorizontally(motion()) + fadeIn(motion(MOTION_SHORT)),
-                    exit = shrinkHorizontally(motion()) + fadeOut(motion(MOTION_SHORT)),
-                ) {
-                    Sidebar(
-                        app, Modifier.width(sidebarWidth),
-                        onOpenSettings = onOpenSettings,
-                        onAddServer = onAddServer,
-                        onOpened = { onShowList(false) },
-                        onMessage = onMessage,
-                        onHideSidebar = { onSidebarOpen(false) },
-                    )
+            // One value drives both sides, so the sidebar's edge and the workspace stay locked
+            // together. It's read only while placing them, so nothing recomposes as it moves.
+            val open = remember { Animatable(if (sidebarOpen) 1f else 0f) }
+            LaunchedEffect(sidebarOpen) { open.animateTo(if (sidebarOpen) 1f else 0f, motion(MOTION_LONG)) }
+            val sidebarShown by remember { derivedStateOf { open.value > 0f } }
+            Box(Modifier.fillMaxSize()) {
+                if (sidebarShown) {
+                    Box(
+                        Modifier
+                            .width(sidebarWidth)
+                            .fillMaxHeight()
+                            .graphicsLayer { translationX = -(1f - open.value) * size.width },
+                    ) {
+                        Sidebar(
+                            app, Modifier.fillMaxWidth(),
+                            onOpenSettings = onOpenSettings,
+                            onAddServer = onAddServer,
+                            onOpened = { onShowList(false) },
+                            onMessage = onMessage,
+                            onHideSidebar = { onSidebarOpen(false) },
+                        )
+                    }
                 }
-                Box(Modifier.weight(1f)) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .layout { measurable, constraints ->
+                            val left = (sidebarWidth.toPx() * open.value).roundToInt()
+                            val width = constraints.maxWidth - left
+                            val placeable = measurable.measure(constraints.copy(minWidth = width, maxWidth = width))
+                            layout(constraints.maxWidth, constraints.maxHeight) { placeable.place(left, 0) }
+                        },
+                ) {
                     if (connection != null && sessionId != null) {
-                        Workspace(app, connection, sessionId, compact = false, sidebarHidden = !sidebarOpen, onShowSidebar = { onSidebarOpen(true) }, onMessage = onMessage)
+                        Workspace(
+                            app, connection, sessionId, compact = false,
+                            sidebarHidden = !sidebarOpen,
+                            layoutMoving = open.isRunning,
+                            onShowSidebar = { onSidebarOpen(true) },
+                            onMessage = onMessage,
+                        )
                     } else {
                         EmptyWorkspace()
                     }

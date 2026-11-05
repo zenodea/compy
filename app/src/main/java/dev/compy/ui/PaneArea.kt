@@ -13,8 +13,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -26,6 +26,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -41,7 +42,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -53,6 +56,7 @@ import dev.compy.rex.LayoutNode
 import dev.compy.rex.TerminalSession
 import dev.compy.rex.WindowView
 import dev.compy.term.TerminalView
+import kotlin.math.roundToInt
 
 private val PaneShape = RoundedCornerShape(18.dp)
 private val Gap = 6.dp
@@ -112,9 +116,7 @@ fun PaneArea(
     val overrides = remember(window.id) { mutableStateMapOf<String, Float>() }
     // Panes already here when the window opens shouldn't animate in.
     val known = remember(window.id) { mutableSetOf<String>() }
-    BoxWithConstraints(modifier) {
-        val fullW = maxWidth
-        val fullH = maxHeight
+    Box(modifier) {
         val zoomed = window.zoomedBlockId
         val panes = mutableListOf<Pair<String, FractionRect>>()
         val splits = mutableListOf<PlacedSplit>()
@@ -124,7 +126,7 @@ fun PaneArea(
         val multiple = zoomed == null && panes.size > 1
         val dragging = overrides.isNotEmpty()
         val firstLayout = known.isEmpty()
-        val inset by animateDpAsState(if (multiple) Gap / 2 else 0.dp, motion(), label = "inset")
+        val inset = animateDpAsState(if (multiple) Gap / 2 else 0.dp, motion(), label = "inset")
         panes.forEach { (blockId, rect) ->
             key(blockId) {
                 val isNew = !firstLayout && blockId !in known
@@ -136,8 +138,6 @@ fun PaneArea(
                     onTop = zoomed == blockId,
                     snap = dragging,
                     animateIn = isNew,
-                    fullW = fullW,
-                    fullH = fullH,
                     inset = inset,
                 ) {
                     TerminalPane(
@@ -158,7 +158,7 @@ fun PaneArea(
                 layer.layout?.let { place(it, layer.bounds, overrides, inner, mutableListOf()) }
                 inner.forEach { (blockId, rect) ->
                     key(blockId) {
-                        Box(paneModifier(rect, fullW, fullH, Gap / 2).zIndex(2f)) {
+                        Box(Modifier.zIndex(2f).fractionalPane({ rect }, { Gap / 2 })) {
                             TerminalPane(
                                 controller = controller,
                                 blockId = blockId,
@@ -175,7 +175,7 @@ fun PaneArea(
         if (!arranging && zoomed == null) {
             splits.forEach { placed ->
                 key(placed.split.splitId) {
-                    SplitHandle(placed, fullW, fullH, onDrag = { ratio ->
+                    SplitHandle(placed, dragging, onDrag = { ratio ->
                         overrides[placed.split.splitId] = ratio
                     }, onRelease = { ratio ->
                         controller.connection.resizePane(
@@ -194,9 +194,28 @@ fun PaneArea(
                 }
             }
         } else if (arranging) {
-            ArrangeOverlay(panes, fullW, fullH, onDrop)
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+                ArrangeOverlay(panes, maxWidth, maxHeight, onDrop)
+            }
         }
     }
+}
+
+/**
+ * Places a pane as a fraction of its parent, with its edges on whole pixels. It reads its values
+ * only while laying out, so moving panes never recompose their contents.
+ */
+private fun Modifier.fractionalPane(rect: () -> FractionRect, inset: () -> Dp): Modifier = layout { measurable, constraints ->
+    val r = rect()
+    val i = inset().roundToPx()
+    val parentW = constraints.maxWidth
+    val parentH = constraints.maxHeight
+    val left = (parentW * r.x).roundToInt() + i
+    val top = (parentH * r.y).roundToInt() + i
+    val right = (parentW * (r.x + r.w)).roundToInt() - i
+    val bottom = (parentH * (r.y + r.h)).roundToInt() - i
+    val placeable = measurable.measure(Constraints.fixed(maxOf(1, right - left), maxOf(1, bottom - top)))
+    layout(parentW, parentH) { placeable.place(left, top) }
 }
 
 /** One pane's place in the window: it glides to new positions and fades when hidden by a zoom. */
@@ -207,24 +226,23 @@ private fun AnimatedPane(
     onTop: Boolean,
     snap: Boolean,
     animateIn: Boolean,
-    fullW: Dp,
-    fullH: Dp,
-    inset: Dp,
+    inset: State<Dp>,
     content: @Composable () -> Unit,
 ) {
     val spec: AnimationSpec<Float> = if (snap) snap() else motion()
-    val x by animateFloatAsState(target.x, spec, label = "pane-x")
-    val y by animateFloatAsState(target.y, spec, label = "pane-y")
-    val w by animateFloatAsState(target.w, spec, label = "pane-w")
-    val h by animateFloatAsState(target.h, spec, label = "pane-h")
-    val fade by animateFloatAsState(if (visible) 1f else 0f, motion(MOTION_SHORT), label = "pane-fade")
+    val x = animateFloatAsState(target.x, spec, label = "pane-x")
+    val y = animateFloatAsState(target.y, spec, label = "pane-y")
+    val w = animateFloatAsState(target.w, spec, label = "pane-w")
+    val h = animateFloatAsState(target.h, spec, label = "pane-h")
+    val fade = animateFloatAsState(if (visible) 1f else 0f, motion(MOTION_SHORT), label = "pane-fade")
     val enter = remember { Animatable(if (animateIn) 0f else 1f) }
     LaunchedEffect(Unit) { enter.animateTo(1f, motion()) }
     Box(
-        paneModifier(FractionRect(x, y, w, h), fullW, fullH, inset)
+        Modifier
             .zIndex(if (onTop) 1f else 0f)
+            .fractionalPane({ FractionRect(x.value, y.value, w.value, h.value) }, { inset.value })
             .graphicsLayer {
-                alpha = fade * enter.value
+                alpha = fade.value * enter.value
                 val scale = 0.94f + 0.06f * enter.value
                 scaleX = scale
                 scaleY = scale
@@ -238,51 +256,66 @@ private fun paneModifier(rect: FractionRect, w: Dp, h: Dp, inset: Dp): Modifier 
         .size((w * rect.w - inset * 2).coerceAtLeast(1.dp), (h * rect.h - inset * 2).coerceAtLeast(1.dp))
 
 @Composable
-private fun BoxScope.SplitHandle(
+private fun SplitHandle(
     placed: PlacedSplit,
-    fullW: Dp,
-    fullH: Dp,
+    dragging: Boolean,
     onDrag: (Float) -> Unit,
     onRelease: (Float) -> Unit,
 ) {
-    val density = LocalDensity.current
     val rect = placed.rect
     val horizontal = placed.split.horizontal
-    val thickness = 28.dp
     var ratio by remember(placed.split.splitId) { mutableStateOf(placed.ratio) }
     if (kotlin.math.abs(ratio - placed.ratio) > 0.001f) ratio = placed.ratio
-    var dragging by remember { mutableStateOf(false) }
-    val mod = if (horizontal) {
-        val x = fullW * (rect.x + rect.w * placed.ratio) - thickness / 2
-        Modifier.offset(x, fullH * rect.y).size(thickness, fullH * rect.h)
-    } else {
-        val y = fullH * (rect.y + rect.h * placed.ratio) - thickness / 2
-        Modifier.offset(fullW * rect.x, y).size(fullW * rect.w, thickness)
-    }
-    val spanPx = with(density) { if (horizontal) (fullW * rect.w).toPx() else (fullH * rect.h).toPx() }
+    val shownRatio = animateFloatAsState(placed.ratio, if (dragging) snap() else motion(), label = "handle")
+    var active by remember { mutableStateOf(false) }
+    val alpha by animateFloatAsState(if (active) 0.9f else 0.28f, motion(MOTION_SHORT), label = "handle-alpha")
+    var span by remember { mutableStateOf(1f) }
     Box(
-        mod.pointerInput(placed.split.splitId) {
-            detectDragGestures(
-                onDragStart = { dragging = true },
-                onDragEnd = {
-                    dragging = false
-                    onRelease(ratio)
-                },
-                onDragCancel = { dragging = false },
-            ) { change, amount ->
-                change.consume()
-                val delta = (if (horizontal) amount.x else amount.y) / spanPx
-                ratio = (ratio + delta).coerceIn(0.1f, 0.9f)
-                onDrag(ratio)
+        Modifier
+            .layout { measurable, constraints ->
+                val thickness = 28.dp.roundToPx()
+                val parentW = constraints.maxWidth
+                val parentH = constraints.maxHeight
+                span = (if (horizontal) parentW * rect.w else parentH * rect.h).coerceAtLeast(1f)
+                val placeable = if (horizontal) {
+                    measurable.measure(Constraints.fixed(thickness, (parentH * rect.h).roundToInt().coerceAtLeast(1)))
+                } else {
+                    measurable.measure(Constraints.fixed((parentW * rect.w).roundToInt().coerceAtLeast(1), thickness))
+                }
+                val x = if (horizontal) {
+                    (parentW * (rect.x + rect.w * shownRatio.value)).roundToInt() - thickness / 2
+                } else {
+                    (parentW * rect.x).roundToInt()
+                }
+                val y = if (horizontal) {
+                    (parentH * rect.y).roundToInt()
+                } else {
+                    (parentH * (rect.y + rect.h * shownRatio.value)).roundToInt() - thickness / 2
+                }
+                layout(parentW, parentH) { placeable.place(x, y) }
             }
-        },
+            .pointerInput(placed.split.splitId) {
+                detectDragGestures(
+                    onDragStart = { active = true },
+                    onDragEnd = {
+                        active = false
+                        onRelease(ratio)
+                    },
+                    onDragCancel = { active = false },
+                ) { change, amount ->
+                    change.consume()
+                    val delta = (if (horizontal) amount.x else amount.y) / span
+                    ratio = (ratio + delta).coerceIn(0.1f, 0.9f)
+                    onDrag(ratio)
+                }
+            },
         contentAlignment = Alignment.Center,
     ) {
         Box(
             Modifier
                 .size(if (horizontal) 3.dp else 32.dp, if (horizontal) 32.dp else 3.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = if (dragging) 0.9f else 0.28f)),
+                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = alpha)),
         )
     }
 }

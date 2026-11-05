@@ -145,6 +145,9 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     private var panY = 0f
 
     private var sizeChangedAt = 0L
+    private var lastCols = 0
+    private var lastRows = 0
+    private var reflowedAt = 0L
     private var scrollRemainder = 0f
     private val scroller = OverScroller(context)
     private var lastFlingY = 0
@@ -251,6 +254,18 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         val defaultBg = meta[GhosttyTerminal.META_BG]
         val defaultFg = meta[GhosttyTerminal.META_FG]
         canvas.drawColor(defaultBg)
+        // Soften the moment text rewraps to a new size, instead of letting it snap.
+        val now = SystemClock.uptimeMillis()
+        if ((cols != lastCols || rows != lastRows) && lastCols != 0) reflowedAt = now
+        lastCols = cols
+        lastRows = rows
+        val sinceReflow = now - reflowedAt
+        val softening = interactive && sinceReflow < REFLOW_FADE_MS
+        if (softening) {
+            val t = sinceReflow.toFloat() / REFLOW_FADE_MS
+            canvas.saveLayerAlpha(0f, 0f, width.toFloat(), height.toFloat(), (190 + 65 * t).toInt())
+            postInvalidateOnAnimation()
+        }
         val s = scale(cols, rows)
         canvas.save()
         canvas.translate(padding - panX, padding - panY)
@@ -259,6 +274,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         drawCursor(canvas, cols, rows, defaultFg, defaultBg)
         drawHandles(canvas, s)
         canvas.restore()
+        if (softening) canvas.restore()
         drawScrollbar(canvas)
         val blinking = meta[GhosttyTerminal.META_CURSOR_BLINK] != 0 && paneFocused && interactive
         if (blinking) postOnAnimationDelayed(blinkRunnable, BLINK_MS)
@@ -886,6 +902,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         const val MAX_FONT = 32f
         private const val MAX_ZOOM = 4f
         private const val SIZE_SETTLE_MS = 450L
+        private const val REFLOW_FADE_MS = 160L
         private const val SCROLLBAR_FADE_MS = 250L
         private const val MAX_ARROWS_PER_MOVE = 8
         private const val BLINK_MS = 530L

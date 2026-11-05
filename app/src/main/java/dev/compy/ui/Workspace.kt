@@ -19,6 +19,8 @@ import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
@@ -44,7 +46,9 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.unit.offset
 import androidx.compose.ui.zIndex
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -85,6 +89,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -115,6 +120,8 @@ fun Workspace(
     sessionId: String,
     compact: Boolean,
     sidebarHidden: Boolean = false,
+    /** True while the surrounding layout animates, when terminals shouldn't be resized yet. */
+    layoutMoving: Boolean = false,
     onShowSidebar: () -> Unit,
     onMessage: (String) -> Unit,
 ) {
@@ -150,24 +157,29 @@ fun Workspace(
         val target = controller.focusedView() ?: return
         if (imeVisible) target.hideKeyboard() else target.showKeyboard()
     }
-    val arrangeInset by animateDpAsState(if (arranging) 28.dp else 0.dp, label = "arrange")
+    val arrangeInset = animateDpAsState(if (arranging) 28.dp else 0.dp, motion(), label = "arrange")
+    LaunchedEffect(layoutMoving) { controller.holdSizes(layoutMoving) }
+    // The sidebar already lists every window, so the tab strip only shows without it.
+    val showTabs = compact || sidebarHidden
 
     LaunchedEffect(overview) {
         if (overview) controller.focusedView()?.hideKeyboard()
         overviewProgress.animateTo(if (overview) 1f else 0f, motion(MOTION_LONG))
     }
-    val p = overviewProgress.value
-    val chromeAlpha = 1f - p
+    // These only change at the ends, so the animation itself never recomposes this screen.
+    val overviewShown by remember { derivedStateOf { overviewProgress.value > 0f } }
+    val overviewSettled by remember { derivedStateOf { overviewProgress.value >= 1f } }
+    val overviewClosed by remember { derivedStateOf { overviewProgress.value == 0f } }
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        if (p > 0f && view != null) {
+        if (overviewShown && view != null) {
             WindowOverview(
-                controller, view, progress = p,
+                controller, view, progress = { overviewProgress.value },
                 onClose = { overview = false },
                 onMessage = onMessage,
                 onActiveCard = { cardBounds = it },
                 // Once settled, the overview is on top and takes all touches.
-                modifier = Modifier.zIndex(if (p >= 1f) 2f else 0f),
+                modifier = Modifier.zIndex(if (overviewSettled) 2f else 0f),
             )
         }
         Column(
@@ -179,7 +191,7 @@ fun Workspace(
                 .then(if (imeVisible) Modifier else Modifier.navigationBarsPadding()),
         ) {
             if (compact) {
-                Box(Modifier.graphicsLayer { alpha = chromeAlpha }) {
+                Box(Modifier.graphicsLayer { alpha = 1f - overviewProgress.value }) {
                     CompactTopBar(controller, view, window, onShowSidebar, onOverview = { overview = true }, onArrange = { arranging = true }, onMessage = onMessage)
                 }
             }
@@ -198,9 +210,14 @@ fun Workspace(
                             .weight(1f)
                             .fillMaxWidth()
                             .padding(horizontal = 6.dp, vertical = 2.dp)
-                            .padding(horizontal = arrangeInset, vertical = arrangeInset)
+                            .layout { measurable, constraints ->
+                                val inset = arrangeInset.value.roundToPx()
+                                val placeable = measurable.measure(constraints.offset(-inset * 2, -inset * 2))
+                                layout(placeable.width + inset * 2, placeable.height + inset * 2) { placeable.place(inset, inset) }
+                            }
                             .onGloballyPositioned { areaBounds = it.boundsInRoot() }
                             .graphicsLayer {
+                                val p = overviewProgress.value
                                 val area = areaBounds
                                 val card = cardBounds
                                 if (p > 0f && area != null && card != null && area.width > 0f) {
@@ -252,7 +269,7 @@ fun Workspace(
                                         connection.clearAttention(block)
                                     },
                                     arranging = arranging,
-                                    enabled = p == 0f && id == window.id,
+                                    enabled = overviewClosed && id == window.id,
                                     onDrop = { dragged, target, zone ->
                                         when (zone) {
                                             DropZone.Swap -> connection.swapBlocks(sessionId, dragged, target, onMessage)
@@ -268,7 +285,7 @@ fun Workspace(
                     }
                     AnimatedContent(
                         arranging,
-                        Modifier.graphicsLayer { alpha = chromeAlpha },
+                        Modifier.graphicsLayer { alpha = 1f - overviewProgress.value },
                         transitionSpec = {
                             (fadeIn(motion(MOTION_SHORT)) togetherWith fadeOut(motion(MOTION_SHORT))) using SizeTransform(clip = false)
                         },
@@ -295,7 +312,13 @@ fun Workspace(
                             }
                         } else if (view != null) {
                             Column {
-                                WindowPills(controller, view, onMessage, onOpenComposer = { composer = true })
+                                AnimatedVisibility(
+                                    showTabs,
+                                    enter = expandVertically(motion(MOTION_LONG)) + fadeIn(motion(MOTION_LONG)),
+                                    exit = shrinkVertically(motion(MOTION_LONG)) + fadeOut(motion(MOTION_SHORT)),
+                                ) {
+                                    WindowPills(controller, view, onMessage, onOpenComposer = { composer = true })
+                                }
                                 KeyBar(
                                     controller,
                                     keyboardVisible = imeVisible,
@@ -308,11 +331,18 @@ fun Workspace(
                 }
                 AnimatedVisibility(
                     !compact && !arranging,
-                    Modifier.graphicsLayer { alpha = chromeAlpha },
+                    Modifier.graphicsLayer { alpha = 1f - overviewProgress.value },
                     enter = expandHorizontally(motion()) + fadeIn(motion(MOTION_SHORT)),
                     exit = shrinkHorizontally(motion()) + fadeOut(motion(MOTION_SHORT)),
                 ) {
-                    SideRail(controller, view, window, sidebarHidden, onOverview = { overview = true }, onArrange = { arranging = true }, onShowSidebar = onShowSidebar, onMessage = onMessage)
+                    SideRail(
+                        controller, view, window, sidebarHidden,
+                        onOverview = { overview = true },
+                        onArrange = { arranging = true },
+                        onShowSidebar = onShowSidebar,
+                        onOpenComposer = { composer = true },
+                        onMessage = onMessage,
+                    )
                 }
             }
         }
@@ -390,6 +420,7 @@ private fun SideRail(
     onOverview: () -> Unit,
     onArrange: () -> Unit,
     onShowSidebar: () -> Unit,
+    onOpenComposer: () -> Unit,
     onMessage: (String) -> Unit,
 ) {
     Column(
@@ -397,9 +428,17 @@ private fun SideRail(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        if (sidebarHidden) RoundButton(Icons.Rounded.ViewSidebar, "Show sessions", onClick = onShowSidebar)
+        val scale = fadeIn(motion(MOTION_LONG)) + scaleIn(motion(MOTION_LONG), initialScale = 0.7f)
+        val shrink = fadeOut(motion(MOTION_SHORT)) + scaleOut(motion(MOTION_SHORT), targetScale = 0.7f)
+        AnimatedVisibility(sidebarHidden, enter = scale, exit = shrink) {
+            RoundButton(Icons.Rounded.ViewSidebar, "Show sessions", onClick = onShowSidebar)
+        }
         RoundButton(Icons.Rounded.GridView, "All windows", onClick = onOverview)
         ActionsMenu(controller, view, window, onArrange, onMessage, filled = true)
+        // With the tab strip hidden, Compose lives here instead.
+        AnimatedVisibility(!sidebarHidden, enter = scale, exit = shrink) {
+            RoundButton(Icons.Rounded.EditNote, "Compose", onClick = onOpenComposer)
+        }
     }
 }
 
@@ -666,7 +705,7 @@ private fun ComposerSheet(controller: WorkspaceController, sendsEnter: Boolean, 
 private fun WindowOverview(
     controller: WorkspaceController,
     view: SessionView,
-    progress: Float,
+    progress: () -> Float,
     onClose: () -> Unit,
     onMessage: (String) -> Unit,
     onActiveCard: (Rect) -> Unit,
@@ -687,7 +726,7 @@ private fun WindowOverview(
             .pointerInput(Unit) { detectTapGestures { } },
     ) {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
-            Row(Modifier.graphicsLayer { alpha = progress }, verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.graphicsLayer { alpha = progress() }, verticalAlignment = Alignment.CenterVertically) {
                 Text(view.label, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 RoundButton(Icons.Rounded.Add, "New window", onClick = { connection.newWindow(controller.sessionId, onMessage) })
                 Spacer(Modifier.width(8.dp))
@@ -718,15 +757,15 @@ private fun WindowOverview(
                                 .then(if (active) Modifier.onGloballyPositioned { onActiveCard(it.boundsInRoot()) } else Modifier)
                                 .graphicsLayer {
                                     // The real window flies into the active card; others fade in around it.
-                                    alpha = if (active) ((progress - 0.85f) / 0.15f).coerceIn(0f, 1f) else progress
+                                    alpha = if (active) ((progress() - 0.85f) / 0.15f).coerceIn(0f, 1f) else progress()
                                     if (!active) {
-                                        val scale = 0.94f + 0.06f * progress
+                                        val scale = 0.94f + 0.06f * progress()
                                         scaleX = scale
                                         scaleY = scale
                                     }
                                 },
                         )
-                        Row(Modifier.padding(top = 8.dp).graphicsLayer { alpha = progress }, verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.padding(top = 8.dp).graphicsLayer { alpha = progress() }, verticalAlignment = Alignment.CenterVertically) {
                             WindowTile(window, statuses, programs, attention, size = 22.dp)
                             Text(
                                 window.displayTitle(titles),

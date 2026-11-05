@@ -36,6 +36,8 @@ class WorkspaceController(
     private val grids = HashMap<String, Grid>()
     private val sizeJobs = HashMap<String, Job>()
     private val visibleBlocks = HashSet<String>()
+    private val fitted = HashMap<String, Grid>()
+    private var sizesHeld = false
 
     var focusedBlockId by mutableStateOf<String?>(null)
 
@@ -55,6 +57,7 @@ class WorkspaceController(
         views.remove(blockId)
         visibleBlocks -= blockId
         grids.remove(blockId)
+        fitted.remove(blockId)
         sizeJobs.remove(blockId)?.cancel()
     }
 
@@ -178,18 +181,39 @@ class WorkspaceController(
     }
 
     private fun applySize(blockId: String) {
-        if (sizeMode != SizeMode.TakeOver || !app.foreground.value) return
+        if (sizesHeld || sizeMode != SizeMode.TakeOver || !app.foreground.value) return
         val grid = grids[blockId] ?: return
+        // An unchanged size would only make programs redraw for nothing.
+        if (fitted[blockId] == grid) {
+            sizeJobs.remove(blockId)?.cancel()
+            return
+        }
         // Layout changes and pinching report many sizes in a row; only the last one matters.
         sizeJobs[blockId]?.cancel()
         sizeJobs[blockId] = app.scope.launch {
             delay(SIZE_DEBOUNCE_MS)
+            fitted[blockId] = grid
             connection.fitBlock(sessionId, blockId, grid.cols, grid.rows, grid.cellW, grid.cellH)
+        }
+    }
+
+    /**
+     * Holds back terminal size changes while the surrounding layout animates. Programs redraw when
+     * resized, so this sends one change after the motion ends instead of several during it.
+     */
+    fun holdSizes(held: Boolean) {
+        if (sizesHeld == held) return
+        sizesHeld = held
+        if (held) {
+            sizeJobs.values.forEach { it.cancel() }
+        } else {
+            grids.keys.toList().forEach(::applySize)
         }
     }
 
     /** Re-applies sizes after returning to the foreground or changing the session's mode. */
     fun reapplySizes() {
+        fitted.clear()
         if (sizeMode == SizeMode.TakeOver) {
             grids.keys.toList().forEach(::applySize)
         } else {
@@ -201,6 +225,7 @@ class WorkspaceController(
         app.updateSettings { it.copy(sizeModes = it.sizeModes + (sessionId to mode)) }
         // The setting saves asynchronously, so act on the chosen mode directly.
         sizeJobs.values.forEach { it.cancel() }
+        fitted.clear()
         if (mode == SizeMode.Keep) {
             connection.releaseOwnership(sessionId, grids.keys.toList())
         } else {
@@ -212,7 +237,7 @@ class WorkspaceController(
 
     companion object {
         private const val MAX_TYPED = 64
-        private const val SIZE_DEBOUNCE_MS = 120L
+        private const val SIZE_DEBOUNCE_MS = 200L
 
         fun mousePayload(action: String, button: String?, col: Int, row: Int): JsonObject = buildJsonObject {
             put("action", action)
