@@ -163,7 +163,7 @@ class RexControl(
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             val reason = when (response?.code) {
                 403 -> "This server doesn't allow your account"
-                else -> t.message ?: "Connection failed"
+                else -> if (t is java.io.IOException) "Can't reach this server" else t.message ?: "Connection failed"
             }
             finish(reason, response?.code ?: 1006)
         }

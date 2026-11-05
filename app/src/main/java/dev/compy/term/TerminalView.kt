@@ -126,6 +126,24 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     private var draggingHandle = 0
     private var actionMode: ActionMode? = null
 
+    /**
+     * When true this terminal keeps another device's size. Pinching then zooms the picture and
+     * dragging pans it, because the font size wouldn't change what fits.
+     */
+    var keepSize = false
+        set(value) {
+            if (field != value) {
+                field = value
+                zoom = 1f
+                panX = 0f
+                panY = 0f
+                invalidate()
+            }
+        }
+    private var zoom = 1f
+    private var panX = 0f
+    private var panY = 0f
+
     private var scrollRemainder = 0f
     private val scroller = OverScroller(context)
     private var lastFlingY = 0
@@ -186,7 +204,15 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         val w = cols * cellW + padding * 2
         val h = rows * cellH + padding * 2
         val fit = min(width / w, height / h)
-        return min(1f, fit)
+        return min(1f, fit) * zoom
+    }
+
+    private fun clampPan() {
+        val s = scale(meta[GhosttyTerminal.META_COLS], meta[GhosttyTerminal.META_ROWS])
+        val w = meta[GhosttyTerminal.META_COLS] * cellW * s + padding * 2
+        val h = meta[GhosttyTerminal.META_ROWS] * cellH * s + padding * 2
+        panX = panX.coerceIn(0f, max(0f, w - width))
+        panY = panY.coerceIn(0f, max(0f, h - height))
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -221,7 +247,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         canvas.drawColor(defaultBg)
         val s = scale(cols, rows)
         canvas.save()
-        canvas.translate(padding, padding)
+        canvas.translate(padding - panX, padding - panY)
         canvas.scale(s, s)
         for (y in 0 until rows) drawRow(canvas, y, cols, defaultFg, defaultBg)
         drawCursor(canvas, cols, rows, defaultFg, defaultBg)
@@ -526,12 +552,12 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
 
     private fun cellX(px: Float): Int {
         val s = scale(meta[GhosttyTerminal.META_COLS], meta[GhosttyTerminal.META_ROWS])
-        return floor((px - padding) / (cellW * s)).toInt().coerceIn(0, max(0, meta[GhosttyTerminal.META_COLS] - 1))
+        return floor((px + panX - padding) / (cellW * s)).toInt().coerceIn(0, max(0, meta[GhosttyTerminal.META_COLS] - 1))
     }
 
     private fun cellY(py: Float): Int {
         val s = scale(meta[GhosttyTerminal.META_COLS], meta[GhosttyTerminal.META_ROWS])
-        return floor((py - padding) / (cellH * s)).toInt().coerceIn(0, max(0, meta[GhosttyTerminal.META_ROWS] - 1))
+        return floor((py + panY - padding) / (cellH * s)).toInt().coerceIn(0, max(0, meta[GhosttyTerminal.META_ROWS] - 1))
     }
 
     private val appOwnsScroll get() = meta[GhosttyTerminal.META_MOUSE] != 0 || meta[GhosttyTerminal.META_ALT] != 0
@@ -542,8 +568,12 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         val lines = scrollRemainder.toInt()
         if (lines == 0) return
         scrollRemainder -= lines
-        if (appOwnsScroll) {
+        if (meta[GhosttyTerminal.META_MOUSE] != 0) {
             host?.sendWheel(lines.toFloat(), cellX(x), cellY(y))
+        } else if (meta[GhosttyTerminal.META_ALT] != 0) {
+            // Full-screen programs without mouse support, such as less, scroll with arrow keys.
+            val key = if (lines > 0) RexKey.DOWN else RexKey.UP
+            repeat(min(abs(lines), MAX_ARROWS_PER_MOVE)) { host?.sendKey(key) }
         } else {
             session?.terminal?.scroll(lines)
             scrollbarVisibleUntil = SystemClock.uptimeMillis() + 800
@@ -574,6 +604,13 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
 
         override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
             if (scaling || selecting) return true
+            if (keepSize && zoom > 1f) {
+                panX += distanceX
+                panY += distanceY
+                clampPan()
+                invalidate()
+                return true
+            }
             // Dragging up means moving towards newer lines, so the sign carries straight through.
             scrollByPixels(distanceY, e2.x, e2.y)
             return true
@@ -613,6 +650,12 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         }
 
         override fun onScale(detector: ScaleGestureDetector): Boolean {
+            if (keepSize) {
+                zoom = (zoom * detector.scaleFactor).coerceIn(1f, MAX_ZOOM)
+                clampPan()
+                invalidate()
+                return true
+            }
             val next = (fontSizeSp * detector.scaleFactor).coerceIn(MIN_FONT, MAX_FONT)
             if (abs(next - fontSizeSp) >= 0.25f) {
                 fontSizeSp = next
@@ -622,7 +665,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         }
 
         override fun onScaleEnd(detector: ScaleGestureDetector) {
-            host?.onFontSizeChanged(fontSizeSp)
+            if (!keepSize) host?.onFontSizeChanged(fontSizeSp)
             post { scaling = false }
         }
     })
@@ -721,10 +764,10 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             MotionEvent.ACTION_DOWN -> {
                 val (sx, sy, ex, ey) = ordered()
                 val reach = HANDLE_TOUCH_DP * density
-                val startPx = padding + sx * cellW * s
-                val startPy = padding + sy * cellH * s
-                val endPx = padding + (ex + 1) * cellW * s
-                val endPy = padding + (ey + 1) * cellH * s
+                val startPx = padding - panX + sx * cellW * s
+                val startPy = padding - panY + sy * cellH * s
+                val endPx = padding - panX + (ex + 1) * cellW * s
+                val endPy = padding - panY + (ey + 1) * cellH * s
                 val nearStart = abs(event.x - startPx) < reach && abs(event.y - startPy) < reach
                 val nearEnd = abs(event.x - endPx) < reach && abs(event.y - endPy) < reach
                 draggingHandle = when {
@@ -833,6 +876,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     companion object {
         const val MIN_FONT = 6f
         const val MAX_FONT = 32f
+        private const val MAX_ZOOM = 4f
+        private const val MAX_ARROWS_PER_MOVE = 8
         private const val BLINK_MS = 530L
         private const val HANDLE_RADIUS_DP = 6f
         private const val HANDLE_TOUCH_DP = 28f

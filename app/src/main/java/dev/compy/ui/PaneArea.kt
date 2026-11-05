@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.compy.data.SizeMode
 import dev.compy.rex.FractionRect
 import dev.compy.rex.LayoutNode
 import dev.compy.rex.TerminalSession
@@ -338,6 +339,7 @@ fun TerminalPane(
     val fonts by app.fonts.collectAsStateWithLifecycle()
     val session = remember(blockId) { controller.connection.terminal(controller.sessionId, blockId) }
     val state by session.liveState.collectAsState()
+    val fallback by session.fallbackInUse.collectAsState()
     val scheme = MaterialTheme.colorScheme
     val colors = remember(settings.terminalTheme, scheme) { TerminalThemes.colors(settings.terminalTheme, scheme) }
     LaunchedEffect(session, colors) { session.setLocalTheme(colors) }
@@ -365,6 +367,7 @@ fun TerminalPane(
             },
             update = { view ->
                 view.interactive = interactive
+                view.keepSize = settings.sizeModes[controller.sessionId] == SizeMode.Keep
                 view.paneFocused = focused && interactive
                 view.fontSizeSp = settings.fontSizeSp
                 view.tag.let { if (it !== fonts) { view.tag = fonts; view.fontsChanged() } }
@@ -374,6 +377,20 @@ fun TerminalPane(
                 view.bind(null)
             },
         )
+        if (fallback) {
+            Surface(
+                Modifier.align(Alignment.BottomCenter).padding(8.dp),
+                shape = RoundedCornerShape(12.dp),
+                color = scheme.tertiaryContainer,
+            ) {
+                Text(
+                    "This Rex version sends history Compy can't read yet, so earlier output is missing. Update Compy if one is available.",
+                    Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = scheme.onTertiaryContainer,
+                )
+            }
+        }
         if (state != TerminalSession.State.Live) {
             Surface(
                 Modifier.align(Alignment.TopEnd).padding(8.dp),

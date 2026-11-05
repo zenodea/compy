@@ -51,6 +51,8 @@ data class Settings(
     val collapsedSessions: Set<String> = emptySet(),
     val activityMode: Boolean = false,
     val composerSendsEnter: Boolean = true,
+    val lastServerId: String? = null,
+    val lastSessionId: String? = null,
 )
 
 object DefaultKeyBar {

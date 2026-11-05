@@ -96,7 +96,7 @@ fun KeyBar(
             HorizontalPager(pager, Modifier.weight(1f)) { page ->
                 Row(
                     Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     pages.getOrNull(page).orEmpty().forEach { def ->
@@ -124,7 +124,7 @@ private fun RowScope.KeyButton(controller: WorkspaceController, def: KeyDef, onO
     val repeats = def.kind == "key" && def.mods.isEmpty() && def.icon != null
     Box(
         Modifier
-            .widthIn(min = 30.dp)
+            .weight(1f)
             .height(38.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(
@@ -164,7 +164,7 @@ private fun RowScope.KeyButton(controller: WorkspaceController, def: KeyDef, onO
                     },
                 )
             }
-            .padding(horizontal = 3.dp),
+            .padding(horizontal = 1.dp),
         contentAlignment = Alignment.Center,
     ) {
         val tint = when {

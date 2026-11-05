@@ -199,9 +199,14 @@ class WorkspaceController(
 
     fun setSizeMode(mode: SizeMode) {
         app.updateSettings { it.copy(sizeModes = it.sizeModes + (sessionId to mode)) }
-        app.scope.launch {
-            delay(50)
-            reapplySizes()
+        // The setting saves asynchronously, so act on the chosen mode directly.
+        sizeJobs.values.forEach { it.cancel() }
+        if (mode == SizeMode.Keep) {
+            connection.releaseOwnership(sessionId, grids.keys.toList())
+        } else {
+            grids.keys.toList().forEach { block ->
+                grids[block]?.let { connection.fitBlock(sessionId, block, it.cols, it.rows, it.cellW, it.cellH) }
+            }
         }
     }
 

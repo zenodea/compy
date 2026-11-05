@@ -96,7 +96,7 @@ internal fun defaultLabel(url: String): String =
         if (host.firstOrNull()?.isDigit() == true) host else host.substringBefore('.')
     }.ifEmpty { "Rex" }
 
-private fun isVpnOn(context: Context): Boolean {
+internal fun isVpnOn(context: Context): Boolean {
     val cm = context.getSystemService(ConnectivityManager::class.java)
     val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
     return caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
@@ -117,7 +117,7 @@ fun AddServerScreen(app: AppState, canGoBack: Boolean, onDone: () -> Unit) {
     }
 
     fun connect(input: String) {
-        val url = normalizeServerUrl(input, BuildConfig.DEBUG).getOrElse {
+        val url = normalizeServerUrl(input, BuildConfig.ALLOW_CLEARTEXT).getOrElse {
             error = it.message
             return
         }

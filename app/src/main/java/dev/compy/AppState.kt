@@ -65,7 +65,13 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
     private val _connections = MutableStateFlow<Map<String, ServerConnection>>(emptyMap())
     val connections: StateFlow<Map<String, ServerConnection>> = _connections.asStateFlow()
 
-    private val _selection = MutableStateFlow<Selection?>(null)
+    private val _selection = MutableStateFlow(
+        settings.value.let { s ->
+            val server = s.lastServerId
+            val session = s.lastSessionId
+            if (server != null && session != null) Selection(server, session) else null
+        },
+    )
     val selection: StateFlow<Selection?> = _selection.asStateFlow()
 
     private val _foreground = MutableStateFlow(false)
@@ -140,10 +146,16 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
 
     fun select(selection: Selection?) {
         _selection.value = selection
+        remember(selection)
+    }
+
+    private fun remember(selection: Selection?) {
+        updateSettings { it.copy(lastServerId = selection?.serverId, lastSessionId = selection?.sessionId) }
     }
 
     fun requestOpen(selection: Selection) {
         _selection.value = selection
+        remember(selection)
         _openRequests.tryEmit(selection)
     }
 
@@ -198,6 +210,6 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
     companion object {
         private const val PAUSE_AFTER_MS = 20_000L
         private const val LOCK_AFTER_MS = 60_000L
-        const val BuildConfigVersion = "0.1.0"
+        const val BuildConfigVersion = dev.compy.BuildConfig.VERSION_NAME
     }
 }

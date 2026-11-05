@@ -1,0 +1,11 @@
+Compy connects your Android phone, foldable or tablet to your Rex servers.
+
+* Live terminals with full scrollback, drawn by the libghostty-vt engine
+* Your real Rex layout, with draggable dividers and pane arranging
+* Sessions from every server in one list, with agent status at a glance
+* A customizable key bar, a composer for long prompts and voice typing, and hardware keyboard support
+* Material You colors, terminal themes, an AMOLED option and importable fonts
+* Share text into a pane, plus a widget, Quick Settings tile and app shortcuts
+* No telemetry. Compy only talks to your own servers.
+
+Compy is not affiliated with the makers of Rex.

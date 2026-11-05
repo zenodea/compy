@@ -1,0 +1,30 @@
+name: Android
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK parts
+        run: sdkmanager "platforms;android-37.0" "ndk;27.1.12297006" "cmake;3.22.1"
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test and build
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compy-debug
+          path: app/build/outputs/apk/debug/*.apk

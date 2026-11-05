@@ -47,6 +47,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconToggleButton
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -67,10 +68,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.compy.AppState
+import dev.compy.BuildConfig
+import dev.compy.rex.HostEntry
 import dev.compy.Selection
 import dev.compy.rex.BlockInfo
 import dev.compy.rex.ConnectionState
@@ -105,6 +109,7 @@ private fun Dot(color: Color, modifier: Modifier = Modifier) {
 }
 
 private val BlockedColor = Color(0xFFF59E0B)
+private const val TAILSCALE_PACKAGE = "com.tailscale.ipn"
 
 private enum class Priority(val title: String) {
     Blocked("Needs you"), Error("Errors"), Working("Working"), Done("Finished"), Quiet("Quiet")
@@ -221,7 +226,10 @@ private fun ServerSection(
     var renaming by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf(false) }
     var creating by remember { mutableStateOf(false) }
+    var importing by remember { mutableStateOf<List<HostEntry>?>(null) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val saved by app.servers.collectAsStateWithLifecycle()
 
     Column {
         Row(
@@ -239,6 +247,17 @@ private fun ServerSection(
                 if (detail != null) {
                     Text(detail, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
                 }
+                if (state is ConnectionState.Offline && ".ts.net" in connection.config.url && !isVpnOn(context)) {
+                    val launch = remember { context.packageManager.getLaunchIntentForPackage(TAILSCALE_PACKAGE) }
+                    Text(
+                        "Tailscale looks off on this phone.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    if (launch != null) {
+                        TextButton(onClick = { context.startActivity(launch) }) { Text("Open Tailscale") }
+                    }
+                }
             }
             Box {
                 IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreHoriz, "Server options") }
@@ -250,6 +269,20 @@ private fun ServerSection(
                     DropdownMenuItem(text = { Text("Rename") }, onClick = {
                         menu = false
                         renaming = true
+                    })
+                    DropdownMenuItem(text = { Text("Add its other hosts") }, onClick = {
+                        menu = false
+                        scope.launch {
+                            try {
+                                val hosts = connection.listHosts()
+                                val known = saved.map { it.url }
+                                importing = hosts.filter { host ->
+                                    normalizeServerUrl(host.endpoint, BuildConfig.ALLOW_CLEARTEXT).getOrNull()?.let { it !in known } == true
+                                }
+                            } catch (e: Exception) {
+                                onMessage(e.message ?: "Couldn't read this server's hosts")
+                            }
+                        }
                     })
                     DropdownMenuItem(text = { Text("Connect again") }, onClick = {
                         menu = false
@@ -275,6 +308,31 @@ private fun ServerSection(
                 SessionGroup(connection, session, view, selection, query, statuses, attention, titles, session.id in collapsed, app, onOpened, onMessage)
             }
         }
+    }
+    importing?.let { hosts ->
+        AlertDialog(
+            onDismissRequest = { importing = null },
+            title = { Text("Add hosts from ${connection.config.label}") },
+            text = {
+                if (hosts.isEmpty()) {
+                    Text("This server has no other hosts to add.")
+                } else {
+                    Column {
+                        hosts.forEach { host ->
+                            ListItem(
+                                headlineContent = { Text(host.label) },
+                                supportingContent = { Text(host.endpoint) },
+                                modifier = Modifier.clickable {
+                                    normalizeServerUrl(host.endpoint, BuildConfig.ALLOW_CLEARTEXT).getOrNull()?.let { app.addServer(host.label, it) }
+                                    importing = hosts - host
+                                },
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { importing = null }) { Text("Done") } },
+        )
     }
     if (renaming) {
         RenameDialog("Rename server", connection.config.label, onDismiss = { renaming = false }) {

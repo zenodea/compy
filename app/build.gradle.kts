@@ -46,13 +46,24 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             resValue("string", "app_name", "Compy Debug")
+            buildConfigField("boolean", "ALLOW_CLEARTEXT", "true")
         }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             resValue("string", "app_name", "Compy")
+            buildConfigField("boolean", "ALLOW_CLEARTEXT", "false")
             if (keystoreProps.isNotEmpty()) signingConfig = signingConfigs.getByName("release")
+        }
+        // Shrunk like a release, but can reach a local test server. Never publish this one.
+        create("qa") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".qa"
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += "release"
+            resValue("string", "app_name", "Compy QA")
+            buildConfigField("boolean", "ALLOW_CLEARTEXT", "true")
         }
     }
 
