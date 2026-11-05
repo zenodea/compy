@@ -157,9 +157,17 @@ class ServerConnection(
                 bootstrap(c)
                 retries = 0
                 _state.value = ConnectionState.Connected
-                terminals.values.forEach { terminal ->
-                    ensureAttached(terminal.sessionId)
-                    terminal.reconnect()
+                val live = _sessions.value.map { it.id }.toSet()
+                terminals.entries.toList().forEach { (block, terminal) ->
+                    if (terminal.sessionId !in live) {
+                        // The session ended while we were away, such as after a server restart.
+                        terminals.remove(block)
+                        terminal.stop()
+                    } else {
+                        // One pane failing shouldn't take the whole connection down with it.
+                        runCatching { ensureAttached(terminal.sessionId) }
+                        terminal.reconnect()
+                    }
                 }
             } catch (e: Exception) {
                 if (control === c) control = null
