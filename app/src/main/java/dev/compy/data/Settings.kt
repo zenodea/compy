@@ -36,8 +36,15 @@ data class KeyDef(
     val text: String = "",
 )
 
+/** A host's colors, saved so the app looks right before it reconnects. */
+@Serializable
+data class SavedTheme(val foreground: Int, val background: Int, val cursor: Int, val ansi: List<Int>, val scheme: String? = null)
+
 @Serializable
 data class Settings(
+    /** "host" colors the app from the Rex host's theme; "wallpaper" uses Material You. */
+    val appColors: String = "host",
+    val hostThemes: Map<String, SavedTheme> = emptyMap(),
     val themeMode: String = "system",
     val dynamicColor: Boolean = true,
     val amoled: Boolean = false,
@@ -89,8 +96,9 @@ object DefaultKeyBar {
     private fun pick(vararg labels: String) = labels.map { l -> catalog.first { it.label == l } }
 
     val pages: List<List<KeyDef>> = listOf(
-        pick("esc", "ctrl", "opt", "tab", "←", "↓", "↑", "→", "Paste", "Compose"),
-        pick("⌘", "^C", "^D", "⇧⇥", "/", "|", "-", "~", "home", "end", "pgup", "pgdn"),
+        pick("esc", "ctrl", "opt", "tab", "←", "↓", "↑", "→"),
+        pick("Paste", "^C", "^D", "⇧⇥", "/", "|", "-", "~"),
+        pick("home", "end", "pgup", "pgdn", "del", "shift"),
     )
 }
 

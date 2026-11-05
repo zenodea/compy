@@ -21,6 +21,7 @@ class MainActivity : FragmentActivity() {
         handleIntent(intent)
         setContent {
             val settings by state.settings.collectAsStateWithLifecycle()
+            val hostColors by state.appColors.collectAsStateWithLifecycle()
             LaunchedEffect(settings.blockScreenshots) {
                 if (settings.blockScreenshots) {
                     window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -28,7 +29,7 @@ class MainActivity : FragmentActivity() {
                     window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 }
             }
-            CompyTheme(settings) {
+            CompyTheme(settings, hostColors) {
                 CompyRoot(state, this)
             }
         }

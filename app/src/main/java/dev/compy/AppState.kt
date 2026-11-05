@@ -10,12 +10,14 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import dev.compy.data.SavedServer
+import dev.compy.data.SavedTheme
 import dev.compy.data.Settings
 import dev.compy.data.SettingsStore
 import dev.compy.rex.ServerConfig
 import dev.compy.system.Shortcuts
 import dev.compy.system.StatusPublisher
 import dev.compy.rex.ServerConnection
+import dev.compy.rex.TerminalColors
 import dev.compy.term.TerminalFonts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,6 +26,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -65,6 +69,8 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
     private val _connections = MutableStateFlow<Map<String, ServerConnection>>(emptyMap())
     val connections: StateFlow<Map<String, ServerConnection>> = _connections.asStateFlow()
 
+    private val hostThemeRevision = MutableStateFlow(0)
+
     private val _selection = MutableStateFlow(
         settings.value.let { s ->
             val server = s.lastServerId
@@ -87,6 +93,19 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
     private val _openRequests = MutableSharedFlow<Selection>(replay = 1, extraBufferCapacity = 1)
     val openRequests: SharedFlow<Selection> = _openRequests.asSharedFlow()
 
+    /** Colors for the app's own interface, or null to use wallpaper colors. */
+    val appColors: StateFlow<TerminalColors?> = combine(settings, selection, hostThemeRevision) { s, sel, _ ->
+        if (s.appColors != "host") return@combine null
+        when (s.terminalTheme) {
+            "rex" -> {
+                val serverId = sel?.serverId ?: _connections.value.keys.firstOrNull()
+                _connections.value[serverId]?.hostTheme?.value ?: serverId?.let { s.hostThemes[it]?.toColors() }
+            }
+            "material" -> null
+            else -> dev.compy.ui.TerminalThemes.fixedColors(s.terminalTheme)
+        }
+    }.stateIn(scope, SharingStarted.Eagerly, null)
+
     private var pauseJob: Job? = null
     private var leftAt = 0L
 
@@ -100,6 +119,17 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
         }
         ProcessLifecycleOwner.get().lifecycle.addObserver(this)
         StatusPublisher(context, this).start()
+        scope.launch {
+            connections.collectLatest { map ->
+                coroutineScope {
+                    map.values.forEach { c ->
+                        settings.value.hostThemes[c.config.id]?.let { c.seedHostTheme(it.toColors()) }
+                        hostThemeRevision.value++
+                        launch { watchHost(c) }
+                    }
+                }
+            }
+        }
         scope.launch {
             connections.collectLatest { map ->
                 coroutineScope {
@@ -143,6 +173,32 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
         current.filterKeys { it !in next }.values.forEach { it.shutdown() }
         _connections.value = next
     }
+
+    private suspend fun watchHost(c: ServerConnection) = coroutineScope {
+        launch {
+            c.hostTheme.filterNotNull().collect { colors ->
+                hostThemeRevision.value++
+                val saved = colors.toSaved()
+                if (settings.value.hostThemes[c.config.id] != saved) {
+                    updateSettings { it.copy(hostThemes = it.hostThemes + (c.config.id to saved)) }
+                }
+            }
+        }
+        // A host we've never seen needs one terminal opened to learn its colors.
+        launch { c.views.collect { if (it.isNotEmpty() && c.config.id !in settings.value.hostThemes) c.learnHostTheme() } }
+    }
+
+    private fun SavedTheme.toColors() = TerminalColors(
+        foreground, background, cursor,
+        TerminalColors.BUILTIN_PALETTE.copyOf().also { p -> ansi.forEachIndexed { i, v -> if (i < 16) p[i] = v } },
+        scheme,
+    )
+
+    private fun TerminalColors.toSaved() = SavedTheme(
+        foreground, background, cursor,
+        (palette ?: TerminalColors.BUILTIN_PALETTE).take(16),
+        scheme,
+    )
 
     fun select(selection: Selection?) {
         _selection.value = selection

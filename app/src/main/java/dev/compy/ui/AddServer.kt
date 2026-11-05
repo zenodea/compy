@@ -15,7 +15,11 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -30,18 +34,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -135,76 +133,82 @@ fun AddServerScreen(app: AppState, canGoBack: Boolean, onDone: () -> Unit) {
         }
     }
 
-    Surface(Modifier.fillMaxSize()) {
-        Column(
+    val scheme = MaterialTheme.colorScheme
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(scheme.background)
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .imePadding()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        if (canGoBack) RoundButton(Icons.AutoMirrored.Rounded.ArrowBack, "Back", filled = false, onClick = onDone)
+        Text("Connect to Rex", Modifier.padding(top = 12.dp), style = MaterialTheme.typography.headlineSmall)
+        Text(
+            "Join the same tailnet with the Tailscale app, then run this on the computer running Rex:",
+            style = MaterialTheme.typography.bodyMedium,
+            color = scheme.onSurfaceVariant,
+        )
+        Text(
+            "rex server tailscale on\nrex server tailscale pair",
             Modifier
-                .fillMaxSize()
-                .statusBarsPadding()
-                .navigationBarsPadding()
-                .imePadding()
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (canGoBack) IconButton(onClick = onDone) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-                Text("Add a Rex server", style = MaterialTheme.typography.headlineSmall)
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(scheme.surfaceContainer)
+                .padding(14.dp),
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (scanning) {
+            QrScanner(
+                Modifier.fillMaxWidth().height(300.dp).clip(RoundedCornerShape(18.dp)),
+                onCode = { code ->
+                    scanning = false
+                    address = code
+                    connect(code)
+                },
+            )
+            TextButton(onClick = { scanning = false }) { Text("Cancel scan") }
+        } else {
+            Button(
+                onClick = {
+                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                        scanning = true
+                    } else {
+                        cameraPermission.launch(Manifest.permission.CAMERA)
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+            ) {
+                Icon(Icons.Rounded.QrCodeScanner, null, Modifier.height(18.dp))
+                Text("Scan pairing code", Modifier.padding(start = 8.dp))
             }
-            Card {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("On the computer running Rex:", style = MaterialTheme.typography.titleSmall)
-                    Text("rex server tailscale on\nrex server tailscale pair", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-                    Text("Then scan the code it shows. Your phone must be on the same tailnet, using the Tailscale app.", style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-            if (scanning) {
-                QrScanner(
-                    Modifier.fillMaxWidth().height(300.dp).clip(RoundedCornerShape(16.dp)),
-                    onCode = { code ->
-                        scanning = false
-                        address = code
-                        connect(code)
-                    },
-                )
-                TextButton(onClick = { scanning = false }) { Text("Cancel scan") }
+        }
+        Text("Or enter the address", Modifier.padding(top = 10.dp), style = MaterialTheme.typography.labelLarge, color = scheme.onSurfaceVariant)
+        OutlinedTextField(
+            address, { address = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Address") },
+            placeholder = { Text("rex.your-tailnet.ts.net") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
+        )
+        OutlinedTextField(
+            label, { label = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Name (optional)") },
+            singleLine = true,
+        )
+        error?.let { Text(it, color = scheme.error, style = MaterialTheme.typography.bodyMedium) }
+        FilledTonalButton(onClick = { connect(address) }, enabled = !testing && address.isNotBlank(), modifier = Modifier.fillMaxWidth().height(48.dp)) {
+            if (testing) {
+                CircularProgressIndicator(Modifier.padding(end = 8.dp).height(16.dp), strokeWidth = 2.dp)
+                Text("Connecting…")
             } else {
-                Button(
-                    onClick = {
-                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                            scanning = true
-                        } else {
-                            cameraPermission.launch(Manifest.permission.CAMERA)
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Icon(Icons.Filled.QrCodeScanner, null)
-                    Text("Scan pairing code", Modifier.padding(start = 8.dp))
-                }
-            }
-            Text("Or type the address", style = MaterialTheme.typography.titleSmall)
-            OutlinedTextField(
-                address, { address = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Address") },
-                placeholder = { Text("rex.your-tailnet.ts.net") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false),
-            )
-            OutlinedTextField(
-                label, { label = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Name (optional)") },
-                singleLine = true,
-            )
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
-            FilledTonalButton(onClick = { connect(address) }, enabled = !testing && address.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
-                if (testing) {
-                    CircularProgressIndicator(Modifier.padding(end = 8.dp).height(16.dp), strokeWidth = 2.dp)
-                    Text("Connecting…")
-                } else {
-                    Text("Connect")
-                }
+                Text("Connect")
             }
         }
     }

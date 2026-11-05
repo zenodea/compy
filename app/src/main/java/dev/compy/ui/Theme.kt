@@ -1,91 +1,191 @@
 package dev.compy.ui
 
+import android.app.Activity
 import android.content.Context
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
+import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
 import dev.compy.data.Settings
 import dev.compy.rex.TerminalColors
 
-private val FallbackLight = lightColorScheme(
-    primary = Color(0xFF006A75),
-    secondary = Color(0xFF4A6268),
-    tertiary = Color(0xFF525E7D),
-)
-private val FallbackDark = darkColorScheme(
-    primary = Color(0xFF6FD5E3),
-    secondary = Color(0xFFB1CBD1),
-    tertiary = Color(0xFFBAC6EA),
-)
+private val FallbackLight = lightColorScheme(primary = Color(0xFF006A75))
+private val FallbackDark = darkColorScheme(primary = Color(0xFF6FD5E3))
 
-@Composable
-fun isDark(settings: Settings): Boolean = when (settings.themeMode) {
-    "light" -> false
-    "dark" -> true
-    else -> isSystemInDarkTheme()
+private val CompyTypography = Typography().let { t ->
+    t.copy(
+        headlineSmall = t.headlineSmall.copy(fontWeight = FontWeight.SemiBold, fontSize = 24.sp),
+        titleLarge = t.titleLarge.copy(fontWeight = FontWeight.SemiBold, fontSize = 20.sp),
+        titleMedium = t.titleMedium.copy(fontWeight = FontWeight.SemiBold, fontSize = 15.sp, letterSpacing = 0.sp),
+        titleSmall = t.titleSmall.copy(fontWeight = FontWeight.Medium, fontSize = 14.sp, letterSpacing = 0.sp),
+        bodyLarge = t.bodyLarge.copy(fontSize = 15.sp, letterSpacing = 0.sp),
+        bodyMedium = t.bodyMedium.copy(fontSize = 14.sp, letterSpacing = 0.sp),
+        bodySmall = t.bodySmall.copy(fontSize = 12.sp, letterSpacing = 0.sp),
+        labelLarge = t.labelLarge.copy(fontWeight = FontWeight.Medium, fontSize = 13.sp, letterSpacing = 0.sp),
+        labelMedium = t.labelMedium.copy(fontWeight = FontWeight.Medium, fontSize = 12.sp, letterSpacing = 0.sp),
+        labelSmall = TextStyle(fontWeight = FontWeight.Medium, fontSize = 11.sp, lineHeight = 14.sp),
+    )
 }
 
+/** Compy's theme: colors from the Rex host when known, otherwise Material You. */
 @Composable
-fun CompyTheme(settings: Settings, content: @Composable () -> Unit) {
-    val dark = isDark(settings)
+fun CompyTheme(settings: Settings, hostColors: TerminalColors?, content: @Composable () -> Unit) {
+    val systemDark = isSystemInDarkTheme()
+    val dark = when (settings.themeMode) {
+        "light" -> false
+        "dark" -> true
+        else -> systemDark
+    }
     val context = LocalContext.current
-    val scheme = remember(dark, settings.dynamicColor, settings.amoled) {
-        colorSchemeFor(context, dark, settings.dynamicColor, settings.amoled)
+    val scheme = remember(dark, settings.dynamicColor, settings.amoled, hostColors) {
+        if (hostColors != null) {
+            schemeFromTerminal(hostColors, settings.amoled)
+        } else {
+            wallpaperScheme(context, dark, settings.dynamicColor, settings.amoled)
+        }
+    }
+    val view = LocalView.current
+    SideEffect {
+        val window = (view.context as? Activity)?.window ?: return@SideEffect
+        val controller = WindowCompat.getInsetsController(window, view)
+        val lightBars = scheme.background.luminance() > 0.5f
+        controller.isAppearanceLightStatusBars = lightBars
+        controller.isAppearanceLightNavigationBars = lightBars
     }
     MaterialTheme(
         colorScheme = scheme,
+        typography = CompyTypography,
         shapes = Shapes(
-            extraSmall = RoundedCornerShape(8.dp),
-            small = RoundedCornerShape(12.dp),
-            medium = RoundedCornerShape(16.dp),
+            extraSmall = RoundedCornerShape(14.dp),
+            small = RoundedCornerShape(14.dp),
+            medium = RoundedCornerShape(18.dp),
             large = RoundedCornerShape(24.dp),
-            extraLarge = RoundedCornerShape(32.dp),
+            extraLarge = RoundedCornerShape(28.dp),
         ),
     ) {
-        // Screens draw on their own backgrounds, so set the default text color for all of them.
         CompositionLocalProvider(LocalContentColor provides scheme.onSurface, content = content)
     }
 }
 
-private fun colorSchemeFor(context: Context, dark: Boolean, dynamic: Boolean, amoled: Boolean): ColorScheme {
+private fun wallpaperScheme(context: Context, dark: Boolean, dynamic: Boolean, amoled: Boolean): ColorScheme {
     val base = when {
         dynamic && dark -> dynamicDarkColorScheme(context)
         dynamic -> dynamicLightColorScheme(context)
         dark -> FallbackDark
         else -> FallbackLight
     }
-    if (!(dark && amoled)) return base
+    val canvas = if (dark && amoled) Color.Black else base.surfaceContainerLowest
+    return base.copy(background = canvas, surface = canvas)
+}
+
+private fun saturation(c: Color): Float {
+    val max = maxOf(c.red, c.green, c.blue)
+    val min = minOf(c.red, c.green, c.blue)
+    return if (max == 0f) 0f else (max - min) / max
+}
+
+private fun contrast(a: Color, b: Color): Float {
+    val l1 = a.luminance() + 0.05f
+    val l2 = b.luminance() + 0.05f
+    return if (l1 > l2) l1 / l2 else l2 / l1
+}
+
+private fun onColor(c: Color) = if (c.luminance() > 0.45f) Color(0xFF101010) else Color.White
+
+/**
+ * Builds the app's colors from a terminal's. The canvas sits just outside the terminal's own
+ * background, so panes read as floating cards, and accents come from the terminal's palette.
+ */
+internal fun schemeFromTerminal(c: TerminalColors, amoled: Boolean = false): ColorScheme {
+    val bg = if (c.background != 0) Color(c.background) else Color.Black
+    val fg = if (c.foreground != 0) Color(c.foreground) else if (bg.luminance() > 0.5f) Color(0xFF1C1C1C) else Color(0xFFE6E6E6)
+    val dark = when (c.scheme) {
+        "light" -> false
+        "dark" -> true
+        else -> bg.luminance() < 0.4f
+    }
+    val palette = c.palette ?: TerminalColors.BUILTIN_PALETTE
+    val canvas = when {
+        dark && amoled -> Color.Black
+        dark -> lerp(bg, Color.Black, 0.4f)
+        else -> lerp(bg, Color.Black, 0.05f)
+    }
+    val candidates = buildList {
+        if (c.cursor != 0) add(Color(c.cursor))
+        addAll(listOf(12, 4, 13, 5, 14, 6, 10, 2).map { Color(palette[it]) })
+    }
+    val accent = candidates.firstOrNull { saturation(it) > 0.25f && contrast(it, bg) >= 3f } ?: fg
+    val magenta = Color(palette[5])
+    val red = Color(palette[if (dark) 9 else 1])
+    fun tone(amount: Float) = lerp(canvas, fg, amount)
+    val base = if (dark) darkColorScheme() else lightColorScheme()
     return base.copy(
-        background = Color.Black,
-        surface = Color.Black,
-        surfaceContainerLowest = Color.Black,
-        surfaceContainerLow = Color(0xFF0B0B0B),
-        surfaceContainer = Color(0xFF111111),
-        surfaceContainerHigh = Color(0xFF181818),
-        surfaceContainerHighest = Color(0xFF202020),
+        primary = accent,
+        onPrimary = onColor(accent),
+        primaryContainer = lerp(canvas, accent, 0.28f),
+        onPrimaryContainer = lerp(fg, accent, 0.2f),
+        inversePrimary = accent,
+        secondary = lerp(fg, bg, 0.25f),
+        onSecondary = bg,
+        secondaryContainer = tone(0.14f),
+        onSecondaryContainer = fg,
+        tertiary = magenta,
+        onTertiary = onColor(magenta),
+        tertiaryContainer = lerp(canvas, magenta, 0.25f),
+        onTertiaryContainer = fg,
+        background = canvas,
+        onBackground = fg,
+        surface = canvas,
+        onSurface = fg,
+        surfaceVariant = tone(0.1f),
+        onSurfaceVariant = lerp(fg, bg, 0.35f),
+        surfaceTint = accent,
+        inverseSurface = fg,
+        inverseOnSurface = bg,
+        error = red,
+        onError = onColor(red),
+        errorContainer = lerp(canvas, red, 0.25f),
+        onErrorContainer = fg,
+        outline = lerp(fg, bg, 0.6f),
+        outlineVariant = lerp(fg, bg, 0.8f),
+        surfaceBright = tone(0.18f),
+        surfaceDim = canvas,
+        surfaceContainerLowest = canvas,
+        surfaceContainerLow = tone(0.035f),
+        surfaceContainer = tone(0.065f),
+        surfaceContainerHigh = tone(0.1f),
+        surfaceContainerHighest = tone(0.15f),
     )
 }
 
-/** The terminal themes Compy offers. "rex" uses whatever colors the server says. */
+/** The terminal themes Compy offers. "rex" uses whatever colors the host says. */
 object TerminalThemes {
     data class Option(val id: String, val name: String)
 
     val options = listOf(
-        Option("rex", "Follow Rex"),
+        Option("rex", "Match the Rex host"),
         Option("material", "Material You"),
         Option("amoled", "AMOLED black"),
         Option("paper", "Paper"),
@@ -101,7 +201,7 @@ object TerminalThemes {
     private fun palette(vararg ansi: Int): IntArray =
         TerminalColors.BUILTIN_PALETTE.copyOf().also { p -> ansi.forEachIndexed { i, v -> p[i] = c(v) } }
 
-    private fun fixed(id: String): TerminalColors? = when (id) {
+    fun fixedColors(id: String): TerminalColors? = when (id) {
         "amoled" -> TerminalColors(c(0xE6E6E6), c(0x000000), c(0xFFFFFF), null)
         "paper" -> TerminalColors(
             c(0x24292F), c(0xFAFAF8), c(0x24292F),
@@ -136,12 +236,12 @@ object TerminalThemes {
         else -> null
     }
 
-    /** Null means follow what the server says. */
+    /** Null means follow what the host says. */
     fun colors(id: String, scheme: ColorScheme): TerminalColors? = when (id) {
         "rex" -> null
         "material" -> TerminalColors(
             scheme.onSurface.toArgb(), scheme.surfaceContainerLow.toArgb(), scheme.primary.toArgb(), null,
         )
-        else -> fixed(id)
+        else -> fixedColors(id)
     }
 }

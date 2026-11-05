@@ -24,8 +24,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -75,7 +75,7 @@ fun CompyRoot(app: AppState, activity: FragmentActivity) {
     val scope = rememberCoroutineScope()
     val showMessage: (String) -> Unit = { message -> scope.launch { snackbars.showSnackbar(message) } }
 
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerLowest)) {
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         when {
             servers.isEmpty() || screen == Screen.AddServer -> AddServerScreen(
                 app,
@@ -129,7 +129,8 @@ private fun MainLayout(app: AppState, onOpenSettings: () -> Unit, onAddServer: (
         val compact = maxWidth < 600.dp
         val sidebarWidth = if (maxWidth < 840.dp) 280.dp else 320.dp
         var sidebarOpen by rememberSaveable { mutableStateOf(true) }
-        var showList by rememberSaveable { mutableStateOf(true) }
+        // Reopen where you left off; the session list is one back gesture away.
+        var showList by rememberSaveable { mutableStateOf(sessionId == null) }
         LaunchedEffect(Unit) { app.openRequests.collect { showList = false } }
         LaunchedEffect(sessionId) { if (sessionId == null) showList = true }
         if (compact) {
@@ -182,13 +183,14 @@ private fun MainLayout(app: AppState, onOpenSettings: () -> Unit, onAddServer: (
                         app, Modifier.width(sidebarWidth),
                         onOpenSettings = onOpenSettings,
                         onAddServer = onAddServer,
-                        onOpened = {},
+                        onOpened = { showList = false },
                         onMessage = onMessage,
+                        onHideSidebar = { sidebarOpen = false },
                     )
                 }
                 Box(Modifier.weight(1f)) {
                     if (connection != null && sessionId != null) {
-                        Workspace(app, connection, sessionId, compact = false, onShowSidebar = { sidebarOpen = !sidebarOpen }, onMessage = onMessage)
+                        Workspace(app, connection, sessionId, compact = false, sidebarHidden = !sidebarOpen, onShowSidebar = { sidebarOpen = true }, onMessage = onMessage)
                     } else {
                         EmptyWorkspace()
                     }
@@ -206,7 +208,7 @@ private fun EmptyWorkspace() {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(Icons.Filled.Terminal, null, Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Icon(Icons.Rounded.Terminal, null, Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(
             "Choose a window to open it here",
             Modifier.padding(top = 12.dp),
@@ -243,7 +245,7 @@ private fun LockScreen(app: AppState, activity: FragmentActivity) {
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Icon(Icons.Filled.Lock, null, Modifier.size(48.dp))
+            Icon(Icons.Rounded.Lock, null, Modifier.size(48.dp))
             Text("Compy is locked", Modifier.padding(16.dp), style = MaterialTheme.typography.titleMedium)
             Button(onClick = { attempt++ }) { Text("Unlock") }
         }

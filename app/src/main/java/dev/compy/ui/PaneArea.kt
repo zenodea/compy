@@ -42,8 +42,8 @@ import dev.compy.rex.TerminalSession
 import dev.compy.rex.WindowView
 import dev.compy.term.TerminalView
 
-private val PaneShape = RoundedCornerShape(16.dp)
-private val Gap = 4.dp
+private val PaneShape = RoundedCornerShape(18.dp)
+private val Gap = 6.dp
 
 private data class PlacedSplit(
     val split: LayoutNode.Split,
@@ -217,9 +217,9 @@ private fun BoxScope.SplitHandle(
     ) {
         Box(
             Modifier
-                .size(if (horizontal) 4.dp else 36.dp, if (horizontal) 36.dp else 4.dp)
+                .size(if (horizontal) 3.dp else 32.dp, if (horizontal) 32.dp else 3.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = if (dragging) 0.9f else 0.35f)),
+                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = if (dragging) 0.9f else 0.28f)),
         )
     }
 }
@@ -350,12 +350,11 @@ fun TerminalPane(
         Modifier
             .fillMaxSize()
             .clip(PaneShape)
-            .then(if (showFocusRing && focused) Modifier.border(1.5.dp, ringColor, PaneShape) else Modifier),
+            .then(if (showFocusRing && focused) Modifier.border(1.dp, ringColor.copy(alpha = 0.75f), PaneShape) else Modifier),
     ) {
         AndroidView(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(if (showFocusRing) 1.5.dp else 0.dp)
                 .clip(PaneShape),
             factory = { ctx ->
                 TerminalView(ctx) { app.fonts.value }.also { view ->
@@ -426,7 +425,7 @@ fun WindowThumbnail(controller: WorkspaceController, window: WindowView, modifie
             key(blockId) {
                 val session = remember(blockId) { controller.connection.terminal(controller.sessionId, blockId) }
                 AndroidView(
-                    modifier = paneModifier(rect, w, h, 1.dp).clip(RoundedCornerShape(8.dp)),
+                    modifier = paneModifier(rect, w, h, 2.dp).clip(RoundedCornerShape(12.dp)),
                     factory = { ctx ->
                         TerminalView(ctx) { app.fonts.value }.also { view ->
                             view.interactive = false

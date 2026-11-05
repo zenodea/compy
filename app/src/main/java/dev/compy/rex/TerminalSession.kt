@@ -32,6 +32,10 @@ class TerminalSession(
     private val requestTicket: suspend () -> String,
     /** Reads the screen as escape sequences, for when the snapshot can't be decoded. */
     private val readScreen: suspend () -> String?,
+    /** Reports the colors the host gave this terminal. */
+    private val onHostTheme: (TerminalColors) -> Unit = {},
+    /** The host's usual colors, for a terminal that doesn't report any of its own. */
+    private val hostFallback: () -> TerminalColors? = { null },
 ) {
     interface Listener {
         /** New output arrived, or anything else that changes what's drawn. */
@@ -131,9 +135,15 @@ class TerminalSession(
         changed()
     }
 
+    /** Call when the host's usual colors change. */
+    fun hostColorsChanged() {
+        applyColors()
+        changed()
+    }
+
     private fun applyColors() {
         val t = terminal ?: return
-        val c = localTheme ?: theme
+        val c = localTheme ?: theme ?: hostFallback()
         t.setColors(c?.foreground ?: 0, c?.background ?: 0, c?.cursor ?: 0, c?.palette)
     }
 
@@ -315,7 +325,9 @@ class TerminalSession(
                 terminal?.resize(c, r, msg["cell_width_px"].int() ?: 0, msg["cell_height_px"].int() ?: 0)
             }
             "theme" -> {
-                theme = TerminalColors.fromRexTheme(msg)
+                val colors = TerminalColors.fromRexTheme(msg)
+                theme = colors
+                onHostTheme(colors)
                 applyColors()
             }
             "child_exited" -> childExited = true
@@ -339,6 +351,8 @@ data class TerminalColors(
     val background: Int,
     val cursor: Int,
     val palette: IntArray?,
+    /** "light" or "dark" when the host says; otherwise worked out from the background. */
+    val scheme: String? = null,
 ) {
     companion object {
         private fun hex(s: String?): Int {
@@ -357,7 +371,7 @@ data class TerminalColors(
                     if (index in 0..255 && color != 0) p[index] = color
                 }
             }
-            return TerminalColors(hex(msg["foreground"].str()), hex(msg["background"].str()), hex(msg["cursor"].str()), palette)
+            return TerminalColors(hex(msg["foreground"].str()), hex(msg["background"].str()), hex(msg["cursor"].str()), palette, msg["scheme"].str())
         }
 
         /** The standard xterm 256-color palette. */

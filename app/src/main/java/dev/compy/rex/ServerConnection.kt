@@ -84,6 +84,14 @@ class ServerConnection(
     private val _clipboard = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val clipboard: SharedFlow<String> = _clipboard.asSharedFlow()
 
+    /** The colors this host's terminals use, as last reported by any of them. */
+    private val _hostTheme = MutableStateFlow<TerminalColors?>(null)
+    val hostTheme: StateFlow<TerminalColors?> = _hostTheme.asStateFlow()
+
+    /** What each block is running: the program's own name or its foreground process. */
+    private val _programs = MutableStateFlow<Map<String, String>>(emptyMap())
+    val programs: StateFlow<Map<String, String>> = _programs.asStateFlow()
+
     @Volatile private var control: RexControl? = null
     private var reconnectToken: String? = null
     private var connectJob: Job? = null
@@ -206,6 +214,39 @@ class ServerConnection(
         for (session in sessions) refreshView(session.id)
     }
 
+    private var learnJob: Job? = null
+
+    /**
+     * Theme colors only arrive on a terminal stream, and not every terminal reports them, so look
+     * through a few until one does. Streams opened just for this are closed afterwards.
+     */
+    fun learnHostTheme() {
+        if (_hostTheme.value != null || learnJob?.isActive == true) return
+        learnJob = scope.launch {
+            val blocks = _views.value.values.flatMap { view ->
+                view.windows.flatMap { window ->
+                    window.blocks.filter { it.creator.endsWith(".terminal") }.map { view.sessionId to it.id }
+                }
+            }
+            for ((sessionId, blockId) in blocks.take(MAX_THEME_PROBES)) {
+                if (_hostTheme.value != null) return@launch
+                val temporary = !terminals.containsKey(blockId)
+                terminal(sessionId, blockId)
+                var waited = 0L
+                while (_hostTheme.value == null && waited < THEME_PROBE_WAIT_MS) {
+                    delay(100)
+                    waited += 100
+                }
+                if (temporary) releaseTerminal(blockId)
+            }
+        }
+    }
+
+    /** Sets the colors remembered from last time, until the host reports its current ones. */
+    fun seedHostTheme(colors: TerminalColors) {
+        if (_hostTheme.value == null) _hostTheme.value = colors
+    }
+
     private fun refreshView(sessionId: String, ifNewerThan: Long = -1) {
         val known = _views.value[sessionId]
         if (known != null && ifNewerThan in 0..known.revision) return
@@ -237,6 +278,7 @@ class ServerConnection(
                 scope.launch {
                     readStatus(sessionId, block.id)
                     readTitle(sessionId, block.id)
+                    readProcess(sessionId, block.id)
                 }
             }
         }
@@ -262,6 +304,26 @@ class ServerConnection(
         } catch (_: Exception) {
             statusRead -= blockId
         }
+    }
+
+    private suspend fun readProcess(sessionId: String, blockId: String) {
+        val result = runCatching {
+            control?.call(
+                "com.superlogical.terminal.process",
+                buildJsonObject {
+                    put("session_id", sessionId)
+                    put("block_id", blockId)
+                },
+            ).obj()
+        }.getOrNull()
+        setProgram(blockId, result?.get("foreground").obj())
+    }
+
+    /** An interpreter's script says more than its name, so node running claude counts as claude. */
+    private fun setProgram(blockId: String, foreground: JsonObject?) {
+        val name = foreground?.get("name").str() ?: return
+        val script = foreground?.get("script").str()?.substringAfterLast('/')
+        _programs.update { it + (blockId to listOfNotNull(name, script).joinToString("/")) }
     }
 
     private suspend fun readTitle(sessionId: String, blockId: String) {
@@ -322,6 +384,7 @@ class ServerConnection(
                 val id = payload?.get("block_id").str() ?: return
                 _statuses.update { it - id }
                 _attention.update { it - id }
+                _programs.update { it - id }
                 terminals.remove(id)?.stop()
             }
             "block_event" -> handleBlockEvent(sessionId, payload ?: return)
@@ -349,6 +412,7 @@ class ServerConnection(
                 }
             }
             "program_status_removed" -> setStatus(block, null)
+            "process_changed" -> setProgram(block, fields?.get("foreground").obj())
             "bell" -> markAttention(block)
             "desktop_notification" -> {
                 markAttention(block)
@@ -416,6 +480,11 @@ class ServerConnection(
                         ).obj()?.get("content").str()
                     }.getOrNull()
                 },
+                onHostTheme = { colors ->
+                    _hostTheme.value = colors
+                    terminals.values.forEach { it.hostColorsChanged() }
+                },
+                hostFallback = { _hostTheme.value },
             ).also { it.start() }
         }
 
@@ -693,5 +762,10 @@ class ServerConnection(
                 .firstOrNull { !it.startsWith("unix:") && !it.startsWith("pipe:") } ?: return@mapNotNull null
             HostEntry(o["id"].str().orEmpty(), o["label"].str().orEmpty(), endpoint)
         }
+    }
+
+    private companion object {
+        const val MAX_THEME_PROBES = 6
+        const val THEME_PROBE_WAIT_MS = 1_500L
     }
 }

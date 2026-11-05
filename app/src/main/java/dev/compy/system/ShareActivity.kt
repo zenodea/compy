@@ -42,7 +42,8 @@ class ShareActivity : ComponentActivity() {
         }
         setContent {
             val settings by state.settings.collectAsStateWithLifecycle()
-            CompyTheme(settings) {
+            val hostColors by state.appColors.collectAsStateWithLifecycle()
+            CompyTheme(settings, hostColors) {
                 Surface(Modifier.fillMaxSize()) {
                     PanePicker(state, text) { finish() }
                 }

@@ -90,6 +90,12 @@ android {
     testOptions { unitTests.isReturnDefaultValues = true }
 }
 
+// Icons rendered from a local copy of Rex (scripts/import-rex-icons.sh). Never in release builds.
+if (rootProject.file("local-icons").exists()) {
+    android.sourceSets.getByName("debug").assets.srcDir(rootProject.file("local-icons"))
+    android.sourceSets.getByName("qa").assets.srcDir(rootProject.file("local-icons"))
+}
+
 // Builds libghostty-vt from the pinned submodule with Zig before CMake links it.
 val buildGhostty = tasks.register<Exec>("buildGhostty") {
     commandLine(rootProject.file("scripts/build-ghostty.sh").absolutePath)

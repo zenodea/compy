@@ -6,7 +6,20 @@ import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material3.ListItemDefaults
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,12 +31,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowDownward
-import androidx.compose.material.icons.filled.ArrowUpward
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -38,7 +45,6 @@ import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -63,41 +69,68 @@ import java.io.File
 fun SettingsScreen(app: AppState, onBack: () -> Unit) {
     var keyBarEditor by remember { mutableStateOf(false) }
     BackHandler { if (keyBarEditor) keyBarEditor = false else onBack() }
-    Surface(Modifier.fillMaxSize()) {
-        if (keyBarEditor) {
-            KeyBarEditor(app, onBack = { keyBarEditor = false })
-        } else {
-            SettingsList(app, onBack, onEditKeyBar = { keyBarEditor = true })
-        }
+    if (keyBarEditor) {
+        KeyBarEditor(app, onBack = { keyBarEditor = false })
+    } else {
+        SettingsList(app, onBack, onEditKeyBar = { keyBarEditor = true })
     }
 }
 
 @Composable
 private fun Header(title: String, onBack: () -> Unit) {
-    Row(Modifier.statusBarsPadding().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-        Text(title, style = MaterialTheme.typography.titleLarge)
+    Row(Modifier.statusBarsPadding().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        RoundButton(Icons.AutoMirrored.Rounded.ArrowBack, "Back", filled = false, onClick = onBack)
+        Text(title, Modifier.padding(start = 4.dp), style = MaterialTheme.typography.titleLarge)
+    }
+}
+
+/** A titled group of settings on one rounded card. */
+@Composable
+private fun Group(title: String, content: @Composable () -> Unit) {
+    Column(Modifier.padding(horizontal = 12.dp).padding(top = 14.dp)) {
+        Text(
+            title,
+            Modifier.padding(start = 12.dp, bottom = 6.dp),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainer),
+        ) { content() }
     }
 }
 
 @Composable
-private fun Section(title: String) {
-    Text(
-        title,
-        Modifier.padding(start = 16.dp, top = 20.dp, bottom = 4.dp),
-        style = MaterialTheme.typography.labelLarge,
-        color = MaterialTheme.colorScheme.primary,
+private fun Row2(title: String, subtitle: String? = null, onClick: (() -> Unit)? = null, trailing: (@Composable () -> Unit)? = null) {
+    ListItem(
+        headlineContent = { Text(title) },
+        supportingContent = subtitle?.let { { Text(it, style = MaterialTheme.typography.bodySmall) } },
+        trailingContent = trailing,
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier,
     )
 }
 
 @Composable
 private fun SwitchRow(title: String, subtitle: String?, checked: Boolean, onChange: (Boolean) -> Unit) {
-    ListItem(
-        headlineContent = { Text(title) },
-        supportingContent = subtitle?.let { { Text(it) } },
-        trailingContent = { Switch(checked, onChange) },
-        modifier = Modifier.clickable { onChange(!checked) },
-    )
+    Row2(title, subtitle, onClick = { onChange(!checked) }) { Switch(checked, onChange) }
+}
+
+@Composable
+private fun Segments(options: List<Pair<String, String>>, selected: String, onSelect: (String) -> Unit) {
+    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)) {
+        options.forEachIndexed { i, (id, name) ->
+            SegmentedButton(
+                selected = selected == id,
+                onClick = { onSelect(id) },
+                shape = SegmentedButtonDefaults.itemShape(i, options.size),
+                label = { Text(name) },
+            )
+        }
+    }
 }
 
 @Composable
@@ -124,33 +157,26 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Header("Settings", onBack)
-        LazyColumn(Modifier.navigationBarsPadding()) {
-            item { Section("Appearance") }
+        LazyColumn(Modifier.weight(1f).navigationBarsPadding(), contentPadding = PaddingValues(bottom = 24.dp)) {
             item {
-                Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                        listOf("system" to "System", "light" to "Light", "dark" to "Dark").forEachIndexed { i, (id, name) ->
-                            SegmentedButton(
-                                selected = settings.themeMode == id,
-                                onClick = { update { it.copy(themeMode = id) } },
-                                shape = SegmentedButtonDefaults.itemShape(i, 3),
-                            ) { Text(name) }
-                        }
+                Group("Appearance") {
+                    Segments(listOf("host" to "Match terminal", "wallpaper" to "Wallpaper"), settings.appColors) { v -> update { it.copy(appColors = v) } }
+                    if (settings.appColors == "wallpaper") {
+                        Segments(listOf("system" to "System", "light" to "Light", "dark" to "Dark"), settings.themeMode) { v -> update { it.copy(themeMode = v) } }
                     }
+                    SwitchRow("AMOLED black", "Use a pure black canvas with dark colors", settings.amoled) { v -> update { it.copy(amoled = v) } }
                 }
             }
-            item { SwitchRow("Wallpaper colors", "Use Material You colors from your wallpaper", settings.dynamicColor) { v -> update { it.copy(dynamicColor = v) } } }
-            item { SwitchRow("AMOLED black", "Pure black backgrounds in dark theme", settings.amoled) { v -> update { it.copy(amoled = v) } } }
-
-            item { Section("Terminal") }
             item {
-                ListItem(
-                    headlineContent = { Text("Color theme") },
-                    supportingContent = { Text(TerminalThemes.options.firstOrNull { it.id == settings.terminalTheme }?.name.orEmpty()) },
-                    modifier = Modifier.clickable { themeMenu = true },
-                    trailingContent = {
+                Group("Terminal") {
+                    Box {
+                        Row2(
+                            "Colors",
+                            TerminalThemes.options.firstOrNull { it.id == settings.terminalTheme }?.name.orEmpty(),
+                            onClick = { themeMenu = true },
+                        )
                         DropdownMenu(themeMenu, onDismissRequest = { themeMenu = false }) {
                             TerminalThemes.options.forEach { option ->
                                 DropdownMenuItem(
@@ -163,25 +189,17 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
                                 )
                             }
                         }
-                    },
-                )
-            }
-            item {
-                Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    Text("Font size: ${"%.1f".format(settings.fontSizeSp)}", style = MaterialTheme.typography.bodyLarge)
-                    Slider(
-                        settings.fontSizeSp,
-                        onValueChange = { v -> update { it.copy(fontSizeSp = v) } },
-                        valueRange = TerminalView.MIN_FONT..TerminalView.MAX_FONT,
-                    )
-                    Text("You can also pinch a terminal to change this.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-            item {
-                ListItem(
-                    headlineContent = { Text("Font") },
-                    supportingContent = { Text(if (settings.customFontPath == null) "JetBrains Mono Nerd Font (built in)" else "Imported font") },
-                    trailingContent = {
+                    }
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                        Text("Font size: ${"%.1f".format(settings.fontSizeSp)}", style = MaterialTheme.typography.bodyLarge)
+                        Slider(
+                            settings.fontSizeSp,
+                            onValueChange = { v -> update { it.copy(fontSizeSp = v) } },
+                            valueRange = TerminalView.MIN_FONT..TerminalView.MAX_FONT,
+                        )
+                        Text("You can also pinch a terminal.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Row2("Font", if (settings.customFontPath == null) "JetBrains Mono Nerd Font" else "Imported font") {
                         Row {
                             if (settings.customFontPath != null) {
                                 TextButton(onClick = {
@@ -191,46 +209,28 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
                             }
                             TextButton(onClick = { fontPicker.launch(arrayOf("font/*", "application/x-font-ttf", "application/octet-stream")) }) { Text("Import") }
                         }
-                    },
-                )
+                    }
+                    Row2("Key bar", "Reorder keys, add your own and arrange pages", onClick = onEditKeyBar)
+                }
             }
             item {
-                ListItem(
-                    headlineContent = { Text("Key bar") },
-                    supportingContent = { Text("Reorder keys, add your own, and arrange pages") },
-                    modifier = Modifier.clickable(onClick = onEditKeyBar),
-                )
-            }
-
-            item { Section("Security") }
-            item { SwitchRow("Unlock with fingerprint or face", "Asks when you open Compy, and again after a minute away", settings.biometricLock) { v -> update { it.copy(biometricLock = v) } } }
-            item { SwitchRow("Hide from screenshots", "Blocks screenshots and hides Compy in the recent apps screen", settings.blockScreenshots) { v -> update { it.copy(blockScreenshots = v) } } }
-
-            item { Section("About") }
-            item {
-                ListItem(
-                    headlineContent = { Text("Compy ${AppState.BuildConfigVersion}") },
-                    supportingContent = { Text("An unofficial Android client for Rex servers. Not affiliated with Rex's makers.") },
-                )
+                Group("Security") {
+                    SwitchRow("Unlock with fingerprint or face", "Asks when you open Compy, and again after a minute away", settings.biometricLock) { v -> update { it.copy(biometricLock = v) } }
+                    SwitchRow("Hide from screenshots", "Blocks screenshots and hides Compy in recent apps", settings.blockScreenshots) { v -> update { it.copy(blockScreenshots = v) } }
+                }
             }
             item {
-                ListItem(
-                    headlineContent = { Text("Copy debug details") },
-                    supportingContent = { Text("For GitHub issues. Compy sends nothing by itself.") },
-                    modifier = Modifier.clickable {
+                Group("About") {
+                    Row2("Compy ${AppState.BuildConfigVersion}", "An unofficial Android client for Rex servers. Not affiliated with Rex's makers.")
+                    Row2("Copy debug details", "For GitHub issues. Compy sends nothing by itself.", onClick = {
                         val servers = app.connections.value.values.joinToString("\n") {
                             "server: rex ${it.serverVersion.value} state ${it.state.value}"
                         }
                         val details = "Compy ${AppState.BuildConfigVersion}\nAndroid ${android.os.Build.VERSION.RELEASE} ${android.os.Build.MODEL}\n$servers"
                         context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Compy", details))
-                    },
-                )
-            }
-            item {
-                ListItem(
-                    headlineContent = { Text("Open source licenses") },
-                    modifier = Modifier.clickable { showLicenses = true },
-                )
+                    })
+                    Row2("Open source licenses", onClick = { showLicenses = true })
+                }
             }
         }
     }
@@ -241,7 +241,9 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
             text = {
                 Text(
                     "Compy: Apache-2.0\nlibghostty-vt: MIT\nJetBrains Mono and Nerd Fonts: SIL Open Font License 1.1\n" +
-                        "AndroidX and Compose: Apache-2.0\nKotlin and kotlinx: Apache-2.0\nOkHttp: Apache-2.0\nZXing: Apache-2.0",
+                        "AndroidX and Compose: Apache-2.0\nKotlin and kotlinx: Apache-2.0\nOkHttp: Apache-2.0\nZXing: Apache-2.0\n\n" +
+                        "Program icons: Simple Icons, mostly CC0-1.0, with the rest listed in assets/icons/ATTRIBUTION.md. " +
+                        "Names and logos are trademarks of their owners and don't imply endorsement of Compy.",
                 )
             },
             confirmButton = { TextButton(onClick = { showLicenses = false }) { Text("Close") } },
@@ -260,7 +262,7 @@ private fun KeyBarEditor(app: AppState, onBack: () -> Unit) {
         app.updateSettings { it.copy(keyBarPages = change(it.keyBarPages)) }
     }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Header("Key bar", onBack)
         LazyColumn(Modifier.navigationBarsPadding()) {
             pages.forEachIndexed { pageIndex, page ->
@@ -277,17 +279,18 @@ private fun KeyBarEditor(app: AppState, onBack: () -> Unit) {
                 itemsIndexed(page, key = { i, def -> "p$pageIndex-$i-${def.label}" }) { i, def ->
                     ListItem(
                         headlineContent = { Text(def.label) },
+                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                         trailingContent = {
                             Row {
                                 IconButton(enabled = i > 0, onClick = {
                                     setPages { all -> all.mapIndexed { p, keys -> if (p == pageIndex) keys.swapped(i, i - 1) else keys } }
-                                }) { Icon(Icons.Filled.ArrowUpward, "Move earlier") }
+                                }) { Icon(Icons.Rounded.ArrowUpward, "Move earlier") }
                                 IconButton(enabled = i < page.lastIndex, onClick = {
                                     setPages { all -> all.mapIndexed { p, keys -> if (p == pageIndex) keys.swapped(i, i + 1) else keys } }
-                                }) { Icon(Icons.Filled.ArrowDownward, "Move later") }
+                                }) { Icon(Icons.Rounded.ArrowDownward, "Move later") }
                                 IconButton(onClick = {
                                     setPages { all -> all.mapIndexed { p, keys -> if (p == pageIndex) keys.filterIndexed { k, _ -> k != i } else keys } }
-                                }) { Icon(Icons.Filled.Close, "Remove") }
+                                }) { Icon(Icons.Rounded.Close, "Remove") }
                             }
                         },
                     )
@@ -297,7 +300,7 @@ private fun KeyBarEditor(app: AppState, onBack: () -> Unit) {
                 HorizontalDivider(Modifier.padding(top = 12.dp))
                 Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = { setPages { it + listOf(emptyList()) } }) {
-                        Icon(Icons.Filled.Add, null, Modifier.size(18.dp))
+                        Icon(Icons.Rounded.Add, null, Modifier.size(18.dp))
                         Text("Add page", Modifier.padding(start = 4.dp))
                     }
                     TextButton(onClick = { setPages { DefaultKeyBar.pages } }) { Text("Reset to default") }
@@ -314,6 +317,7 @@ private fun KeyBarEditor(app: AppState, onBack: () -> Unit) {
                     itemsIndexed(DefaultKeyBar.catalog) { _, def ->
                         ListItem(
                             headlineContent = { Text(def.label) },
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                             modifier = Modifier.clickable {
                                 setPages { all -> all.mapIndexed { p, keys -> if (p == page) keys + def else keys } }
                                 addingTo = null

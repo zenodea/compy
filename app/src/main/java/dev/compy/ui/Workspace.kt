@@ -7,7 +7,22 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.EditNote
+import androidx.compose.material.icons.rounded.GridView
+import androidx.compose.material.icons.rounded.MoreHoriz
+import androidx.compose.material.icons.rounded.ViewSidebar
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,16 +43,6 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Terminal
-import androidx.compose.material.icons.filled.GridView
-import androidx.compose.material.icons.filled.Keyboard
-import androidx.compose.material.icons.filled.KeyboardHide
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
@@ -86,6 +91,7 @@ fun Workspace(
     connection: ServerConnection,
     sessionId: String,
     compact: Boolean,
+    sidebarHidden: Boolean = false,
     onShowSidebar: () -> Unit,
     onMessage: (String) -> Unit,
 ) {
@@ -96,6 +102,7 @@ fun Workspace(
     val warning by connection.versionWarning.collectAsStateWithLifecycle()
     val foreground by app.foreground.collectAsStateWithLifecycle()
     val settings by app.settings.collectAsStateWithLifecycle()
+    val titles by connection.titles.collectAsStateWithLifecycle()
     val view = views[sessionId]
     val window = view?.activeWindow
 
@@ -116,8 +123,9 @@ fun Workspace(
         val target = controller.focusedView() ?: return
         if (imeVisible) target.hideKeyboard() else target.showKeyboard()
     }
+    val arrangeInset by animateDpAsState(if (arranging) 28.dp else 0.dp, label = "arrange")
 
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerLowest)) {
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Column(
             Modifier
                 .fillMaxSize()
@@ -132,7 +140,13 @@ fun Workspace(
             warning?.let { Notice(it) }
             Row(Modifier.weight(1f).fillMaxWidth()) {
                 Column(Modifier.weight(1f)) {
-                    Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)) {
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                            .padding(horizontal = arrangeInset, vertical = arrangeInset),
+                    ) {
                         if (window == null) {
                             Text(
                                 if (view == null) "Loading…" else "This session has no windows",
@@ -167,18 +181,26 @@ fun Workspace(
                         }
                     }
                     if (arranging) {
-                        Surface(Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.secondaryContainer) {
-                            Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    "Drag a pane onto another's edge to split, or its centre to swap",
-                                    Modifier.weight(1f),
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                                TextButton(onClick = { arranging = false }) { Text("Done") }
-                            }
+                        Column(
+                            Modifier.fillMaxWidth().padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(
+                                window?.displayTitle(titles).orEmpty(),
+                                style = MaterialTheme.typography.titleSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                "Drag a pane onto another's edge to split, or its center to swap",
+                                Modifier.padding(top = 2.dp, bottom = 10.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Button(onClick = { arranging = false }) { Text("Done") }
                         }
                     } else if (view != null) {
-                        WindowPills(controller, view, onMessage)
+                        WindowPills(controller, view, onMessage, onOpenComposer = { composer = true })
                         KeyBar(
                             controller,
                             keyboardVisible = imeVisible,
@@ -187,8 +209,8 @@ fun Workspace(
                         )
                     }
                 }
-                if (!compact) {
-                    SideRail(controller, view, window, imeVisible, onToggleKeyboard = ::toggleKeyboard, onOverview = { overview = true }, onArrange = { arranging = true }, onShowSidebar = onShowSidebar, onMessage = onMessage)
+                if (!compact && !arranging) {
+                    SideRail(controller, view, window, sidebarHidden, onOverview = { overview = true }, onArrange = { arranging = true }, onShowSidebar = onShowSidebar, onMessage = onMessage)
                 }
             }
         }
@@ -204,14 +226,17 @@ fun Workspace(
 
 @Composable
 private fun Notice(text: String) {
-    Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text,
-            Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onErrorContainer,
-        )
-    }
+    Text(
+        text,
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.errorContainer)
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onErrorContainer,
+    )
 }
 
 @Composable
@@ -224,13 +249,19 @@ private fun CompactTopBar(
     onArrange: () -> Unit,
     onMessage: (String) -> Unit,
 ) {
-    val titles by controller.connection.titles.collectAsStateWithLifecycle()
+    val connection = controller.connection
+    val titles by connection.titles.collectAsStateWithLifecycle()
+    val statuses by connection.statuses.collectAsStateWithLifecycle()
+    val programs by connection.programs.collectAsStateWithLifecycle()
+    val attention by connection.attention.collectAsStateWithLifecycle()
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
     Row(
-        Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 2.dp),
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 4.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Sessions") }
-        Column(Modifier.weight(1f)) {
+        RoundButton(Icons.AutoMirrored.Rounded.ArrowBack, "Sessions", filled = false, onClick = onBack)
+        if (window != null) WindowTile(window, statuses, programs, attention, size = 24.dp)
+        Column(Modifier.padding(start = 10.dp).weight(1f)) {
             Text(
                 window?.displayTitle(titles) ?: view?.label.orEmpty(),
                 style = MaterialTheme.typography.titleSmall,
@@ -240,13 +271,13 @@ private fun CompactTopBar(
             Text(
                 view?.label.orEmpty(),
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = muted,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        IconButton(onClick = onOverview) { Icon(Icons.Filled.GridView, "All windows") }
-        ActionsMenu(controller, view, window, onArrange, onMessage)
+        RoundButton(Icons.Rounded.GridView, "All windows", filled = false, tint = muted, onClick = onOverview)
+        ActionsMenu(controller, view, window, onArrange, onMessage, filled = false)
     }
 }
 
@@ -256,26 +287,20 @@ private fun SideRail(
     controller: WorkspaceController,
     view: SessionView?,
     window: WindowView?,
-    imeVisible: Boolean,
-    onToggleKeyboard: () -> Unit,
+    sidebarHidden: Boolean,
     onOverview: () -> Unit,
     onArrange: () -> Unit,
     onShowSidebar: () -> Unit,
     onMessage: (String) -> Unit,
 ) {
     Column(
-        Modifier.width(56.dp).padding(vertical = 8.dp),
+        Modifier.width(54.dp).padding(top = 8.dp, end = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        FilledTonalIconButton(onClick = onShowSidebar) { Icon(Icons.Filled.Menu, "Sessions") }
-        FilledTonalIconButton(onClick = onOverview) { Icon(Icons.Filled.GridView, "All windows") }
-        Box {
-            ActionsMenu(controller, view, window, onArrange, onMessage, tonal = true)
-        }
-        FilledTonalIconButton(onClick = onToggleKeyboard) {
-            Icon(if (imeVisible) Icons.Filled.KeyboardHide else Icons.Filled.Keyboard, "Keyboard")
-        }
+        if (sidebarHidden) RoundButton(Icons.Rounded.ViewSidebar, "Show sessions", onClick = onShowSidebar)
+        RoundButton(Icons.Rounded.GridView, "All windows", onClick = onOverview)
+        ActionsMenu(controller, view, window, onArrange, onMessage, filled = true)
     }
 }
 
@@ -286,7 +311,7 @@ private fun ActionsMenu(
     window: WindowView?,
     onArrange: () -> Unit,
     onMessage: (String) -> Unit,
-    tonal: Boolean = false,
+    filled: Boolean,
 ) {
     var open by remember { mutableStateOf(false) }
     var rename by remember { mutableStateOf<RenameTarget?>(null) }
@@ -300,11 +325,10 @@ private fun ActionsMenu(
     val keepSize = (settings.sizeModes[sessionId] ?: SizeMode.TakeOver) == SizeMode.Keep
 
     Box {
-        if (tonal) {
-            FilledTonalIconButton(onClick = { open = true }) { Icon(Icons.Filled.MoreVert, "More") }
-        } else {
-            IconButton(onClick = { open = true }) { Icon(Icons.Filled.MoreVert, "More") }
-        }
+        RoundButton(
+            Icons.Rounded.MoreHoriz, "More", filled = filled,
+            tint = if (filled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+        ) { open = true }
         DropdownMenu(open, onDismissRequest = { open = false }) {
             DropdownMenuItem(
                 text = { Text("Split right") },
@@ -346,7 +370,7 @@ private fun ActionsMenu(
                     focused?.let { connection.closeBlock(sessionId, it, onMessage) }
                 },
             )
-            HorizontalDivider()
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             DropdownMenuItem(
                 text = { Text("Keep other device's size") },
                 trailingIcon = { Switch(checked = keepSize, onCheckedChange = null) },
@@ -355,7 +379,7 @@ private fun ActionsMenu(
                     controller.setSizeMode(if (keepSize) SizeMode.TakeOver else SizeMode.Keep)
                 },
             )
-            HorizontalDivider()
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             DropdownMenuItem(
                 text = { Text("Rename window") },
                 enabled = window != null,
@@ -413,76 +437,74 @@ private fun ActionsMenu(
 
 private enum class RenameTarget { Window, Session }
 
-@Composable
-fun RenameDialog(title: String, initial: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
-    var text by remember { mutableStateOf(initial) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = { OutlinedTextField(text, { text = it }, singleLine = true) },
-        confirmButton = { TextButton(onClick = { onConfirm(text.trim()) }, enabled = text.isNotBlank()) { Text("Save") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
-}
-
-/** The strip of tabs for a session's windows. */
+/** A capsule of window tabs. The active one shows its name; the others are just their icons. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun WindowPills(controller: WorkspaceController, view: SessionView, onMessage: (String) -> Unit) {
+private fun WindowPills(controller: WorkspaceController, view: SessionView, onMessage: (String) -> Unit, onOpenComposer: () -> Unit) {
     val connection = controller.connection
     val statuses by connection.statuses.collectAsStateWithLifecycle()
     val attention by connection.attention.collectAsStateWithLifecycle()
     val titles by connection.titles.collectAsStateWithLifecycle()
+    val programs by connection.programs.collectAsStateWithLifecycle()
+    val scheme = MaterialTheme.colorScheme
     var menuFor by remember { mutableStateOf<String?>(null) }
     var renaming by remember { mutableStateOf<WindowView?>(null) }
-    LazyRow(
-        Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 10.dp).padding(top = 6.dp, bottom = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        items(view.windows, key = { it.id }) { window ->
-            val active = window.id == view.activeWindow?.id
-            Box {
-                Surface(
-                    shape = CircleShape,
-                    color = if (active) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
-                    modifier = Modifier.combinedClickable(
-                        onClick = { connection.focusWindow(controller.sessionId, window.id) },
-                        onLongClick = { menuFor = window.id },
-                    ),
-                ) {
-                    Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        StatusDot(window.blocks.map { it.id }, statuses, attention)
-                        Text(
-                            window.displayTitle(titles),
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(start = 4.dp).widthIn(max = PillLabelMaxWidth),
-                        )
+        LazyRow(
+            Modifier
+                .weight(1f, fill = false)
+                .clip(CircleShape)
+                .background(scheme.surfaceContainerHigh)
+                .padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            items(view.windows, key = { it.id }) { window ->
+                val active = window.id == view.activeWindow?.id
+                Box {
+                    Row(
+                        Modifier
+                            .clip(CircleShape)
+                            .background(if (active) scheme.surfaceContainerHighest else Color.Transparent)
+                            .combinedClickable(
+                                onClick = { connection.focusWindow(controller.sessionId, window.id) },
+                                onLongClick = { menuFor = window.id },
+                            )
+                            .padding(horizontal = 5.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        WindowTile(window, statuses, programs, attention, size = 22.dp)
+                        if (active) {
+                            Text(
+                                window.displayTitle(titles),
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(start = 7.dp, end = 6.dp).widthIn(max = 150.dp),
+                            )
+                        }
+                    }
+                    DropdownMenu(menuFor == window.id, onDismissRequest = { menuFor = null }) {
+                        DropdownMenuItem(text = { Text("Rename") }, onClick = {
+                            menuFor = null
+                            renaming = window
+                        })
+                        DropdownMenuItem(text = { Text("Close window") }, onClick = {
+                            menuFor = null
+                            connection.closeWindow(controller.sessionId, window.id, onMessage)
+                        })
                     }
                 }
-                DropdownMenu(menuFor == window.id, onDismissRequest = { menuFor = null }) {
-                    DropdownMenuItem(text = { Text("Rename") }, onClick = {
-                        menuFor = null
-                        renaming = window
-                    })
-                    DropdownMenuItem(text = { Text("Close window") }, onClick = {
-                        menuFor = null
-                        connection.closeWindow(controller.sessionId, window.id, onMessage)
-                    })
-                }
             }
         }
-        item(key = "add") {
-            Surface(
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                modifier = Modifier.clickable { connection.newWindow(controller.sessionId, onMessage) },
-            ) {
-                Icon(Icons.Filled.Add, "New window", Modifier.padding(6.dp).size(18.dp))
-            }
+        RoundButton(Icons.Rounded.Add, "New window", size = 36.dp, tint = scheme.onSurfaceVariant) {
+            connection.newWindow(controller.sessionId, onMessage)
         }
+        RoundButton(Icons.Rounded.EditNote, "Compose", size = 36.dp, tint = scheme.onSurfaceVariant, onClick = onOpenComposer)
     }
     renaming?.let { window ->
         RenameDialog("Rename window", window.label, onDismiss = { renaming = null }) { label ->
@@ -491,8 +513,6 @@ private fun WindowPills(controller: WorkspaceController, view: SessionView, onMe
         }
     }
 }
-
-private val PillLabelMaxWidth = 120.dp
 
 /** A pop-up editor with normal keyboard features, for long prompts and voice typing. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -527,58 +547,47 @@ private fun ComposerSheet(controller: WorkspaceController, sendsEnter: Boolean, 
     }
 }
 
-/** Every window in a session as a live thumbnail. */
+/** Every window in a session as a live thumbnail on the bare canvas. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WindowOverview(controller: WorkspaceController, view: SessionView, onClose: () -> Unit, onMessage: (String) -> Unit) {
     val connection = controller.connection
     val titles by connection.titles.collectAsStateWithLifecycle()
+    val statuses by connection.statuses.collectAsStateWithLifecycle()
+    val programs by connection.programs.collectAsStateWithLifecycle()
+    val attention by connection.attention.collectAsStateWithLifecycle()
+    val scheme = MaterialTheme.colorScheme
     androidx.activity.compose.BackHandler(onBack = onClose)
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceContainerLowest) {
-        Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(16.dp)) {
+    Box(Modifier.fillMaxSize().background(scheme.background)) {
+        Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(view.label, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                IconButton(onClick = {
-                    connection.newWindow(controller.sessionId, onMessage)
-                }) { Icon(Icons.Filled.Add, "New window") }
-                IconButton(onClick = onClose) { Icon(Icons.Filled.Close, "Close") }
+                Text(view.label, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                RoundButton(Icons.Rounded.Add, "New window", onClick = { connection.newWindow(controller.sessionId, onMessage) })
+                Spacer(Modifier.width(8.dp))
+                RoundButton(Icons.Rounded.Close, "Close", onClick = onClose)
             }
-            androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
-                columns = androidx.compose.foundation.lazy.grid.GridCells.Adaptive(240.dp),
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(220.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-                modifier = Modifier.padding(top = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(20.dp),
+                modifier = Modifier.padding(top = 16.dp),
             ) {
-                items(view.windows.size, key = { view.windows[it].id }) { i ->
-                    val window = view.windows[i]
+                items(view.windows, key = { it.id }) { window ->
                     Column(
                         Modifier.clickable {
                             connection.focusWindow(controller.sessionId, window.id)
                             onClose()
                         },
                     ) {
-                        Box(
-                            Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 160.dp, max = 160.dp)
-                                .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(12.dp))
-                                .padding(2.dp),
-                        ) {
-                            WindowThumbnail(controller, window, Modifier.fillMaxSize())
-                        }
-                        Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Terminal, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        WindowThumbnail(controller, window, Modifier.fillMaxWidth().aspectRatio(1.35f))
+                        Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            WindowTile(window, statuses, programs, attention, size = 22.dp)
                             Text(
                                 window.displayTitle(titles),
-                                Modifier.padding(start = 6.dp).weight(1f),
+                                Modifier.padding(start = 8.dp).weight(1f),
                                 style = MaterialTheme.typography.labelLarge,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(
-                                if (window.blocks.size == 1) "1 pane" else "${window.blocks.size} panes",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
