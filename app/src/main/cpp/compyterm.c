@@ -1,0 +1,331 @@
+// JNI bridge between Kotlin and libghostty-vt.
+#include <jni.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ghostty/vt.h>
+
+typedef struct {
+  GhosttyTerminal term;
+  GhosttyRenderState rs;
+  GhosttyRenderStateRowIterator rows;
+  GhosttyRenderStateRowCells cells;
+} Term;
+
+enum {
+  META_COLS, META_ROWS, META_BG, META_FG, META_CURSOR_COLOR, META_CURSOR_VISIBLE, META_CURSOR_X,
+  META_CURSOR_Y, META_CURSOR_STYLE, META_SCROLL_TOTAL, META_SCROLL_OFFSET, META_SCROLL_LEN,
+  META_MOUSE, META_ALT, META_BRACKETED, META_CURSOR_BLINK, META_EXTRAS_LEN, META_COUNT
+};
+
+enum { FLAG_BOLD = 1, FLAG_ITALIC = 2, FLAG_FAINT = 4, FLAG_INVERSE = 8, FLAG_INVISIBLE = 16,
+       FLAG_STRIKE = 32, FLAG_UNDERLINE = 64, FLAG_OVERLINE = 128, FLAG_BLINK = 256,
+       FLAG_SELECTED = 512, FLAG_WIDE = 1024, FLAG_SPACER = 2048 };
+
+static inline jint rgb(GhosttyColorRgb c) {
+  return (jint)(0xFF000000u | ((uint32_t)c.r << 16) | ((uint32_t)c.g << 8) | c.b);
+}
+
+static Term* wrap(GhosttyTerminal t) {
+  Term* h = calloc(1, sizeof(Term));
+  h->term = t;
+  ghostty_render_state_new(NULL, &h->rs);
+  ghostty_render_state_row_iterator_new(NULL, &h->rows);
+  ghostty_render_state_row_cells_new(NULL, &h->cells);
+  return h;
+}
+
+JNIEXPORT jlong JNICALL Java_dev_compy_term_GhosttyTerminal_nativeNew(
+    JNIEnv* env, jclass cls, jint cols, jint rows) {
+  GhosttyTerminal t = NULL;
+  if (ghostty_terminal_new(NULL, &t, (uint16_t)cols, (uint16_t)rows) != GHOSTTY_SUCCESS) return 0;
+  return (jlong)(intptr_t)wrap(t);
+}
+
+JNIEXPORT jlong JNICALL Java_dev_compy_term_GhosttyTerminal_nativeDecodeSnapshot(
+    JNIEnv* env, jclass cls, jbyteArray data, jint len) {
+  jbyte* bytes = (*env)->GetByteArrayElements(env, data, NULL);
+  GhosttySnapshotDecoder d = NULL;
+  GhosttyTerminal t = NULL;
+  GhosttyResult r = ghostty_snapshot_decoder_new_buf(NULL, &d, (const uint8_t*)bytes, (size_t)len);
+  if (r == GHOSTTY_SUCCESS) {
+    const bool compress = true;
+    ghostty_snapshot_decoder_set(d, GHOSTTY_SNAPSHOT_DECODER_OPT_COMPRESS_HISTORY, &compress);
+    r = ghostty_snapshot_decoder_decode(d, &t);
+  }
+  if (d) ghostty_snapshot_decoder_free(d);
+  (*env)->ReleaseByteArrayElements(env, data, bytes, JNI_ABORT);
+  if (r != GHOSTTY_SUCCESS || !t) return 0;
+  return (jlong)(intptr_t)wrap(t);
+}
+
+JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeFree(
+    JNIEnv* env, jclass cls, jlong handle) {
+  Term* h = (Term*)(intptr_t)handle;
+  if (!h) return;
+  ghostty_render_state_row_cells_free(h->cells);
+  ghostty_render_state_row_iterator_free(h->rows);
+  ghostty_render_state_free(h->rs);
+  ghostty_terminal_free(h->term);
+  free(h);
+}
+
+JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeWrite(
+    JNIEnv* env, jclass cls, jlong handle, jbyteArray data, jint off, jint len) {
+  Term* h = (Term*)(intptr_t)handle;
+  jbyte* bytes = (*env)->GetPrimitiveArrayCritical(env, data, NULL);
+  ghostty_terminal_vt_write(h->term, (const uint8_t*)bytes + off, (size_t)len);
+  (*env)->ReleasePrimitiveArrayCritical(env, data, bytes, JNI_ABORT);
+}
+
+JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeResize(
+    JNIEnv* env, jclass cls, jlong handle, jint cols, jint rows, jint cw, jint ch) {
+  Term* h = (Term*)(intptr_t)handle;
+  ghostty_terminal_resize(h->term, (uint16_t)cols, (uint16_t)rows, (uint32_t)cw, (uint32_t)ch);
+}
+
+JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeScroll(
+    JNIEnv* env, jclass cls, jlong handle, jint delta) {
+  Term* h = (Term*)(intptr_t)handle;
+  GhosttyTerminalScrollViewport b = {0};
+  b.tag = GHOSTTY_SCROLL_VIEWPORT_DELTA;
+  b.value.delta = delta;
+  ghostty_terminal_scroll_viewport(h->term, b);
+}
+
+JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeScrollToBottom(
+    JNIEnv* env, jclass cls, jlong handle) {
+  Term* h = (Term*)(intptr_t)handle;
+  GhosttyTerminalScrollViewport b = {0};
+  b.tag = GHOSTTY_SCROLL_VIEWPORT_BOTTOM;
+  ghostty_terminal_scroll_viewport(h->term, b);
+}
+
+JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSetColors(
+    JNIEnv* env, jclass cls, jlong handle, jint fg, jint bg, jint cursor, jintArray palette) {
+  Term* h = (Term*)(intptr_t)handle;
+  GhosttyColorRgb f = {(uint8_t)(fg >> 16), (uint8_t)(fg >> 8), (uint8_t)fg};
+  GhosttyColorRgb b = {(uint8_t)(bg >> 16), (uint8_t)(bg >> 8), (uint8_t)bg};
+  GhosttyColorRgb c = {(uint8_t)(cursor >> 16), (uint8_t)(cursor >> 8), (uint8_t)cursor};
+  ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, fg == 0 ? NULL : &f);
+  ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, bg == 0 ? NULL : &b);
+  ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, cursor == 0 ? NULL : &c);
+  if (palette == NULL) {
+    ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, NULL);
+  } else {
+    jint values[256];
+    (*env)->GetIntArrayRegion(env, palette, 0, 256, values);
+    GhosttyColorRgb pal[256];
+    for (int i = 0; i < 256; i++) {
+      pal[i].r = (uint8_t)(values[i] >> 16);
+      pal[i].g = (uint8_t)(values[i] >> 8);
+      pal[i].b = (uint8_t)values[i];
+    }
+    ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, pal);
+  }
+}
+
+// Fills the frame arrays. Returns false when nothing changed since the last call.
+// cells holds 4 ints per cell: codepoint (or -(index+1) into extras), fg, bg, flags.
+// A colour of 0 means "use the terminal default".
+JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeRender(
+    JNIEnv* env, jclass cls, jlong handle, jintArray metaArr, jintArray cellsArr, jintArray extrasArr,
+    jboolean force) {
+  Term* h = (Term*)(intptr_t)handle;
+  if (ghostty_render_state_update(h->rs, h->term) != GHOSTTY_SUCCESS) return JNI_FALSE;
+  GhosttyRenderStateDirty dirty = GHOSTTY_RENDER_STATE_DIRTY_FALSE;
+  ghostty_render_state_get(h->rs, GHOSTTY_RENDER_STATE_DATA_DIRTY, &dirty);
+  if (!force && dirty == GHOSTTY_RENDER_STATE_DIRTY_FALSE) return JNI_FALSE;
+
+  jint meta[META_COUNT];
+  memset(meta, 0, sizeof(meta));
+  uint16_t cols = 0, rows = 0;
+  ghostty_render_state_get(h->rs, GHOSTTY_RENDER_STATE_DATA_COLS, &cols);
+  ghostty_render_state_get(h->rs, GHOSTTY_RENDER_STATE_DATA_ROWS, &rows);
+  meta[META_COLS] = cols;
+  meta[META_ROWS] = rows;
+
+  GhosttyRenderStateColors colors = GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);
+  ghostty_render_state_get(h->rs, GHOSTTY_RENDER_STATE_DATA_COLORS, &colors);
+  meta[META_BG] = rgb(colors.background);
+  meta[META_FG] = rgb(colors.foreground);
+  meta[META_CURSOR_COLOR] = colors.cursor_has_value ? rgb(colors.cursor) : 0;
+
+  GhosttyRenderStateCursor cursor = GHOSTTY_INIT_SIZED(GhosttyRenderStateCursor);
+  ghostty_render_state_get(h->rs, GHOSTTY_RENDER_STATE_DATA_CURSOR, &cursor);
+  meta[META_CURSOR_VISIBLE] = cursor.visible && cursor.viewport_has_value;
+  meta[META_CURSOR_X] = cursor.viewport_x;
+  meta[META_CURSOR_Y] = cursor.viewport_y;
+  meta[META_CURSOR_STYLE] = (jint)cursor.visual_style;
+  meta[META_CURSOR_BLINK] = cursor.blinking;
+
+  GhosttyTerminalScrollbar sb = {0};
+  ghostty_terminal_get(h->term, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &sb);
+  meta[META_SCROLL_TOTAL] = (jint)sb.total;
+  meta[META_SCROLL_OFFSET] = (jint)sb.offset;
+  meta[META_SCROLL_LEN] = (jint)sb.len;
+
+  bool mouse = false;
+  ghostty_terminal_get(h->term, GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, &mouse);
+  meta[META_MOUSE] = mouse;
+  GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+  ghostty_terminal_get(h->term, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen);
+  meta[META_ALT] = screen != GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+  GhosttyTerminalModeConfig bracket = {0};
+  bracket.mode = GHOSTTY_MODE_BRACKETED_PASTE;
+  ghostty_terminal_get(h->term, GHOSTTY_TERMINAL_DATA_MODE, &bracket);
+  meta[META_BRACKETED] = bracket.value;
+
+  jsize cap = (*env)->GetArrayLength(env, cellsArr);
+  jsize extrasCap = (*env)->GetArrayLength(env, extrasArr);
+  jsize needed = (jsize)cols * rows * 4;
+  jint extrasLen = 0;
+  if (needed <= cap) {
+    jint* out = (*env)->GetPrimitiveArrayCritical(env, cellsArr, NULL);
+    jint* extras = (*env)->GetPrimitiveArrayCritical(env, extrasArr, NULL);
+    ghostty_render_state_get(h->rs, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &h->rows);
+    int y = 0;
+    while (y < rows && ghostty_render_state_row_iterator_next(h->rows)) {
+      GhosttyRenderStateRowSelection sel = GHOSTTY_INIT_SIZED(GhosttyRenderStateRowSelection);
+      bool hasSel = ghostty_render_state_row_get(h->rows, GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION, &sel) == GHOSTTY_SUCCESS;
+      ghostty_render_state_row_get(h->rows, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, &h->cells);
+      int x = 0;
+      jint* row = out + (size_t)y * cols * 4;
+      while (x < cols && ghostty_render_state_row_cells_next(h->cells)) {
+        jint* c = row + (size_t)x * 4;
+        jint cp = 0, fg = 0, bg = 0, flags = 0;
+        uint32_t glen = 0;
+        ghostty_render_state_row_cells_get(h->cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &glen);
+        if (glen > 0) {
+          uint32_t buf[32];
+          uint32_t tmp[256];
+          uint32_t* gb = glen <= 32 ? buf : (glen <= 256 ? tmp : NULL);
+          if (gb) {
+            ghostty_render_state_row_cells_get(h->cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, gb);
+            if (glen == 1) {
+              cp = (jint)gb[0];
+            } else if ((jsize)(extrasLen + glen + 1) <= extrasCap) {
+              cp = -(extrasLen + 1);
+              extras[extrasLen++] = (jint)glen;
+              for (uint32_t i = 0; i < glen; i++) extras[extrasLen++] = (jint)gb[i];
+            } else {
+              cp = (jint)gb[0];
+            }
+          }
+        }
+        GhosttyColorRgb col;
+        if (ghostty_render_state_row_cells_get(h->cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR, &col) == GHOSTTY_SUCCESS) bg = rgb(col);
+        bool styled = false;
+        ghostty_render_state_row_cells_get(h->cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_HAS_STYLING, &styled);
+        if (styled) {
+          if (ghostty_render_state_row_cells_get(h->cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR, &col) == GHOSTTY_SUCCESS) fg = rgb(col);
+          GhosttyStyle style;
+          memset(&style, 0, sizeof(style));
+          ghostty_render_state_row_cells_get(h->cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &style);
+          if (style.flags & GHOSTTY_STYLE_FLAG_BOLD) flags |= FLAG_BOLD;
+          if (style.flags & GHOSTTY_STYLE_FLAG_ITALIC) flags |= FLAG_ITALIC;
+          if (style.flags & GHOSTTY_STYLE_FLAG_FAINT) flags |= FLAG_FAINT;
+          if (style.flags & GHOSTTY_STYLE_FLAG_INVERSE) flags |= FLAG_INVERSE;
+          if (style.flags & GHOSTTY_STYLE_FLAG_INVISIBLE) flags |= FLAG_INVISIBLE;
+          if (style.flags & GHOSTTY_STYLE_FLAG_STRIKETHROUGH) flags |= FLAG_STRIKE;
+          if (style.flags & GHOSTTY_STYLE_FLAG_OVERLINE) flags |= FLAG_OVERLINE;
+          if (style.flags & GHOSTTY_STYLE_FLAG_BLINK) flags |= FLAG_BLINK;
+          if (GHOSTTY_STYLE_UNDERLINE(style) != 0) flags |= FLAG_UNDERLINE;
+        }
+        GhosttyCell raw = 0;
+        if (ghostty_render_state_row_cells_get(h->cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &raw) == GHOSTTY_SUCCESS) {
+          GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
+          ghostty_cell_get(raw, GHOSTTY_CELL_DATA_WIDE, &wide);
+          if (wide == GHOSTTY_CELL_WIDE_WIDE) flags |= FLAG_WIDE;
+          else if (wide != GHOSTTY_CELL_WIDE_NARROW) flags |= FLAG_SPACER;
+        }
+        if (hasSel && x >= sel.start_x && x <= sel.end_x) flags |= FLAG_SELECTED;
+        c[0] = cp; c[1] = fg; c[2] = bg; c[3] = flags;
+        x++;
+      }
+      y++;
+    }
+    (*env)->ReleasePrimitiveArrayCritical(env, extrasArr, extras, 0);
+    (*env)->ReleasePrimitiveArrayCritical(env, cellsArr, out, 0);
+  }
+  meta[META_EXTRAS_LEN] = extrasLen;
+  (*env)->SetIntArrayRegion(env, metaArr, 0, META_COUNT, meta);
+  ghostty_render_state_clean(h->rs);
+  return JNI_TRUE;
+}
+
+static bool viewport_ref(Term* h, int x, int y, GhosttyGridRef* ref) {
+  GhosttyPoint p = {0};
+  p.tag = GHOSTTY_POINT_TAG_VIEWPORT;
+  p.value.coordinate.x = (uint16_t)x;
+  p.value.coordinate.y = (uint32_t)y;
+  memset(ref, 0, sizeof(*ref));
+  return ghostty_terminal_grid_ref(h->term, p, ref) == GHOSTTY_SUCCESS;
+}
+
+JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSelectRange(
+    JNIEnv* env, jclass cls, jlong handle, jint x1, jint y1, jint x2, jint y2) {
+  Term* h = (Term*)(intptr_t)handle;
+  GhosttySelection sel;
+  memset(&sel, 0, sizeof(sel));
+  if (!viewport_ref(h, x1, y1, &sel.start) || !viewport_ref(h, x2, y2, &sel.end)) return JNI_FALSE;
+  return ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_SELECTION, &sel) == GHOSTTY_SUCCESS;
+}
+
+JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSelectWord(
+    JNIEnv* env, jclass cls, jlong handle, jint x, jint y) {
+  Term* h = (Term*)(intptr_t)handle;
+  GhosttyTerminalSelectWordOptions o = GHOSTTY_INIT_SIZED(GhosttyTerminalSelectWordOptions);
+  if (!viewport_ref(h, x, y, &o.ref)) return JNI_FALSE;
+  GhosttySelection sel;
+  memset(&sel, 0, sizeof(sel));
+  if (ghostty_terminal_select_word(h->term, &o, &sel) != GHOSTTY_SUCCESS) return JNI_FALSE;
+  return ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_SELECTION, &sel) == GHOSTTY_SUCCESS;
+}
+
+JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeClearSelection(
+    JNIEnv* env, jclass cls, jlong handle) {
+  Term* h = (Term*)(intptr_t)handle;
+  ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_SELECTION, NULL);
+}
+
+JNIEXPORT jstring JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSelectionText(
+    JNIEnv* env, jclass cls, jlong handle) {
+  Term* h = (Term*)(intptr_t)handle;
+  GhosttySelection sel;
+  memset(&sel, 0, sizeof(sel));
+  if (ghostty_terminal_get(h->term, GHOSTTY_TERMINAL_DATA_SELECTION, &sel) != GHOSTTY_SUCCESS) return NULL;
+  GhosttyTerminalSelectionFormatOptions o = GHOSTTY_INIT_SIZED(GhosttyTerminalSelectionFormatOptions);
+  o.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
+  o.unwrap = true;
+  o.trim = true;
+  o.selection = &sel;
+  uint8_t* out = NULL;
+  size_t len = 0;
+  if (ghostty_terminal_selection_format_alloc(h->term, NULL, &o, &out, &len) != GHOSTTY_SUCCESS || !out) return NULL;
+  char* z = malloc(len + 1);
+  memcpy(z, out, len);
+  z[len] = 0;
+  ghostty_free(NULL, out, len);
+  jbyteArray bytes = (*env)->NewByteArray(env, (jsize)len);
+  (*env)->SetByteArrayRegion(env, bytes, 0, (jsize)len, (const jbyte*)z);
+  free(z);
+  jclass strCls = (*env)->FindClass(env, "java/lang/String");
+  jmethodID ctor = (*env)->GetMethodID(env, strCls, "<init>", "([BLjava/lang/String;)V");
+  jstring utf8 = (*env)->NewStringUTF(env, "UTF-8");
+  return (jstring)(*env)->NewObject(env, strCls, ctor, bytes, utf8);
+}
+
+JNIEXPORT jstring JNICALL Java_dev_compy_term_GhosttyTerminal_nativeTitle(
+    JNIEnv* env, jclass cls, jlong handle) {
+  Term* h = (Term*)(intptr_t)handle;
+  GhosttyString s = {0};
+  if (ghostty_terminal_get(h->term, GHOSTTY_TERMINAL_DATA_TITLE, &s) != GHOSTTY_SUCCESS || s.len == 0) return NULL;
+  char* z = malloc(s.len + 1);
+  memcpy(z, s.ptr, s.len);
+  z[s.len] = 0;
+  jstring out = (*env)->NewStringUTF(env, z);
+  free(z);
+  return out;
+}
