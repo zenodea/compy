@@ -185,6 +185,7 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
             }
         }
         // A host we've never seen needs one terminal opened to learn its colors.
+        launch { c.selections.collect { requestOpen(Selection(c.config.id, it)) } }
         launch { c.views.collect { if (it.isNotEmpty() && c.config.id !in settings.value.hostThemes) c.learnHostTheme() } }
     }
 

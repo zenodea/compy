@@ -88,6 +88,8 @@ data class ProgramStatus(
     val kind: String?,
     val app: String?,
     val message: String?,
+    /** Percent complete, when the program reports it. */
+    val progress: Int? = null,
 ) {
     val isBlocked get() = state == "blocked"
     val isWorking get() = state == "working"
@@ -191,6 +193,7 @@ internal fun parseStatusRecord(e: JsonElement?): ProgramStatus? {
         kind = o["kind"].str(),
         app = o["effective_app"].str() ?: o["app"].str(),
         message = o["msg"].str(),
+        progress = o["progress"].int(),
     )
 }
 
@@ -205,3 +208,62 @@ internal fun mostUrgent(records: List<ProgramStatus>): ProgramStatus? =
             else -> 0
         }
     }
+
+/** The last part of a reported directory, from a file:// URL or a plain path. */
+fun folderName(pwd: String?): String? {
+    if (pwd.isNullOrBlank()) return null
+    val path = if (pwd.startsWith("file://")) {
+        pwd.removePrefix("file://").let { rest -> if (rest.startsWith("/")) rest else "/" + rest.substringAfter('/', "") }
+    } else {
+        pwd
+    }
+    val name = path.trimEnd('/').substringAfterLast('/')
+    if (name.isEmpty()) return "/"
+    return runCatching { java.net.URLDecoder.decode(name.replace("+", "%2B"), "UTF-8") }.getOrDefault(name)
+}
+
+/** An action a person can run from the command palette. */
+data class RexAction(
+    val name: String,
+    val title: String,
+    val description: String?,
+    val category: String?,
+    val keywords: String?,
+    val isBlockAction: Boolean,
+    val needsArguments: Boolean,
+)
+
+data class RexBinding(val keys: List<String>, val action: String, val args: JsonElement?)
+
+data class RexKeymap(val actions: List<RexAction>, val bindings: List<RexBinding>)
+
+internal fun parseKeymap(e: JsonElement?): RexKeymap {
+    val o = e.obj()
+    val actions = o?.get("actions").arr().orEmpty().mapNotNull { a ->
+        val action = a.obj() ?: return@mapNotNull null
+        val kind = action["kind"].str()
+        // Client actions belong to one specific app, such as Rex on a Mac, so Compy can't run them.
+        if (kind != "lua" && kind != "block") return@mapNotNull null
+        val name = action["name"].str() ?: return@mapNotNull null
+        RexAction(
+            name = name,
+            title = action["title"].str() ?: name,
+            description = action["description"].str(),
+            category = action["category"].str(),
+            keywords = action["keywords"].str(),
+            isBlockAction = kind == "block",
+            needsArguments = action["args"].obj()?.get("required").arr()?.isNotEmpty() == true,
+        )
+    }
+    val bindings = o?.get("bindings").arr().orEmpty().mapNotNull { b ->
+        val binding = b.obj() ?: return@mapNotNull null
+        // A binding in a mode only applies inside that mode, so it isn't a general command.
+        if (binding["mode"].str() != null) return@mapNotNull null
+        RexBinding(
+            keys = binding["keys"].arr().orEmpty().mapNotNull { it.str() },
+            action = binding["action"].str() ?: return@mapNotNull null,
+            args = binding["args"]?.takeIf { it !is JsonNull },
+        )
+    }
+    return RexKeymap(actions, bindings)
+}

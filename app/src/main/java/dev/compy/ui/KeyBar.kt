@@ -29,6 +29,8 @@ import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.KeyboardCommandKey
+import androidx.compose.material.icons.rounded.KeyboardDoubleArrowDown
+import androidx.compose.material.icons.rounded.KeyboardDoubleArrowUp
 import androidx.compose.material.icons.rounded.KeyboardHide
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -66,6 +68,8 @@ private fun iconFor(name: String?): ImageVector? = when (name) {
     "enter" -> Icons.AutoMirrored.Rounded.KeyboardReturn
     "paste" -> Icons.Rounded.ContentPaste
     "composer" -> Icons.Rounded.EditNote
+    "prompt-up" -> Icons.Rounded.KeyboardDoubleArrowUp
+    "prompt-down" -> Icons.Rounded.KeyboardDoubleArrowDown
     else -> null
 }
 
@@ -90,6 +94,7 @@ fun KeyBar(
     keyboardVisible: Boolean,
     onToggleKeyboard: () -> Unit,
     onOpenComposer: () -> Unit,
+    onOpenPalette: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val settings by controller.app.settings.collectAsStateWithLifecycle()
@@ -101,7 +106,7 @@ fun KeyBar(
             .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        RoundKey(controller, CommandKey)
+        RoundKey(controller, CommandKey, onOpenPalette)
         val pager = rememberPagerState { pages.size.coerceAtLeast(1) }
         HorizontalPager(pager, Modifier.weight(1f).padding(horizontal = 4.dp)) { page ->
             Row(
@@ -121,7 +126,7 @@ fun KeyBar(
 }
 
 @Composable
-private fun RoundKey(controller: WorkspaceController, def: KeyDef) {
+private fun RoundKey(controller: WorkspaceController, def: KeyDef, onOpenPalette: () -> Unit) {
     val bit = stickyBit(def)
     val active = controller.stickyMods and bit != 0
     val scheme = MaterialTheme.colorScheme
@@ -131,11 +136,14 @@ private fun RoundKey(controller: WorkspaceController, def: KeyDef) {
         label = "command",
     )
     RoundButton(
-        iconFor(def.icon)!!, def.label,
+        iconFor(def.icon)!!, "Commands",
         tint = if (active) scheme.onPrimary else scheme.onSurface,
         modifier = Modifier.clip(CircleShape).background(background),
         filled = false,
-    ) { controller.toggleSticky(bit) }
+        // A tap opens the commands, which is what you usually want on a phone. Holding latches ⌘.
+        onLongClick = { controller.toggleSticky(bit) },
+        onClick = { if (active) controller.toggleSticky(bit) else onOpenPalette() },
+    )
 }
 
 @Composable

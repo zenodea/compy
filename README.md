@@ -19,6 +19,9 @@ In Compy, tap **Scan pairing code** and scan what it shows, or type the `ts.net`
 - **Layout:** Rex's real split layout, with draggable dividers and an arrange mode. These edits change the layout for every connected client.
 - **Sizes:** each session either fits terminals to this screen while Compy is open, or keeps another device's size with pan and zoom.
 - **Servers:** all your servers in one list. Activity view groups panes by what needs you.
+- **Commands:** tap `⌘` for a searchable palette of Compy's commands and the host's Rex actions; hold it to latch the modifier.
+- **Terminal tools:** tap links, find in scrollback, and jump between prompts or copy a command's output when the shell marks them with OSC 133.
+- **Status:** progress rings, the current folder under each window, and a haptic on the terminal bell.
 - **Input:** direct typing, a customizable key bar, a composer with voice typing, and hardware keyboard and mouse support.
 - **Look:** the whole app takes its colors from the Rex host's terminal theme, or from your wallpaper if you prefer.
 - **Android:** predictive back, a share target for text, app shortcuts, a home screen widget and a Quick Settings tile.

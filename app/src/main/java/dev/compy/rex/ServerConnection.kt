@@ -14,6 +14,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
@@ -91,6 +93,22 @@ class ServerConnection(
     /** What each block is running: the program's own name or its foreground process. */
     private val _programs = MutableStateFlow<Map<String, String>>(emptyMap())
     val programs: StateFlow<Map<String, String>> = _programs.asStateFlow()
+
+    /** Each block's current folder name. */
+    private val _folders = MutableStateFlow<Map<String, String>>(emptyMap())
+    val folders: StateFlow<Map<String, String>> = _folders.asStateFlow()
+
+    /** Progress programs report separately from their status, in percent, or -1 when unknown. */
+    private val _progress = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val progress: StateFlow<Map<String, Int>> = _progress.asStateFlow()
+
+    /** Sessions a Rex action asked this client to show. */
+    private val _selections = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val selections: SharedFlow<String> = _selections.asSharedFlow()
+
+    /** Blocks that just rang the terminal bell. */
+    private val _bells = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val bells: SharedFlow<String> = _bells.asSharedFlow()
 
     @Volatile private var control: RexControl? = null
     private var reconnectToken: String? = null
@@ -279,6 +297,7 @@ class ServerConnection(
                     readStatus(sessionId, block.id)
                     readTitle(sessionId, block.id)
                     readProcess(sessionId, block.id)
+                    readFolder(sessionId, block.id)
                 }
             }
         }
@@ -304,6 +323,24 @@ class ServerConnection(
         } catch (_: Exception) {
             statusRead -= blockId
         }
+    }
+
+    private suspend fun readFolder(sessionId: String, blockId: String) {
+        val result = runCatching {
+            control?.call(
+                "com.superlogical.terminal.pwd",
+                buildJsonObject {
+                    put("session_id", sessionId)
+                    put("block_id", blockId)
+                },
+            ).obj()
+        }.getOrNull()
+        setFolder(blockId, result?.get("pwd").str())
+    }
+
+    private fun setFolder(blockId: String, pwd: String?) {
+        val name = folderName(pwd) ?: return
+        _folders.update { it + (blockId to name) }
     }
 
     private suspend fun readProcess(sessionId: String, blockId: String) {
@@ -365,12 +402,54 @@ class ServerConnection(
                 val sessions = parseSessions(result?.get("sessions"))
                 if (sessions.isNotEmpty()) _sessions.value = sessions
             }
+            "client_perform_requested" -> handlePerform(payload ?: return)
+            // Compy never lists other servers with an action, so this shouldn't arrive, but the
+            // action would wait for an answer if it did.
+            "client_call_requested" -> reply(payload?.get("call_id").str() ?: return, "not_supported", "Compy can't call other servers")
             "session_event" -> {
                 val sessionId = payload?.get("session_id").str() ?: return
                 val event = payload?.get("event").obj() ?: return
                 handleSessionEvent(sessionId, event["type"].str().orEmpty(), event["payload"].obj())
             }
         }
+    }
+
+    /**
+     * Rex actions can ask the client that started them to do something, and then wait for the
+     * answer, so every request gets one, even if it's only that Compy can't do it.
+     */
+    private fun handlePerform(payload: JsonObject) {
+        val callId = payload["call_id"].str() ?: return
+        val args = payload["args"].obj()
+        when (payload["action"].str()) {
+            "session.select" -> {
+                val sessionId = args?.get("session_id").str() ?: payload["session_id"].str()
+                val windowId = args?.get("window_id").str()
+                if (sessionId != null) {
+                    _selections.tryEmit(sessionId)
+                    if (windowId != null) focusWindow(sessionId, windowId)
+                }
+                reply(callId, null, null)
+            }
+            else -> reply(callId, "not_supported", "Compy can't do that yet")
+        }
+    }
+
+    private fun reply(callId: String, code: String?, message: String?) {
+        control?.fire(
+            "client.reply",
+            buildJsonObject {
+                put("call_id", callId)
+                if (code == null) {
+                    put("result", JsonNull)
+                } else {
+                    put("error", buildJsonObject {
+                        put("code", code)
+                        put("message", message.orEmpty())
+                    })
+                }
+            },
+        )
     }
 
     private fun handleSessionEvent(sessionId: String, type: String, payload: JsonObject?) {
@@ -385,6 +464,8 @@ class ServerConnection(
                 _statuses.update { it - id }
                 _attention.update { it - id }
                 _programs.update { it - id }
+                _folders.update { it - id }
+                _progress.update { it - id }
                 terminals.remove(id)?.stop()
             }
             "block_event" -> handleBlockEvent(sessionId, payload ?: return)
@@ -413,7 +494,21 @@ class ServerConnection(
             }
             "program_status_removed" -> setStatus(block, null)
             "process_changed" -> setProgram(block, fields?.get("foreground").obj())
-            "bell" -> markAttention(block)
+            "bell" -> {
+                markAttention(block)
+                _bells.tryEmit(block)
+            }
+            "pwd_changed" -> setFolder(block, fields?.get("pwd").str())
+            "progress_report" -> {
+                val percent = fields?.get("progress").int()
+                when (fields?.get("state").str()) {
+                    "set" -> if (percent != null) _progress.update { it + (block to percent) }
+                    "indeterminate" -> _progress.update { it + (block to -1) }
+                    // Paused or failed work still has a position worth showing.
+                    "pause", "error" -> if (percent != null) _progress.update { it + (block to percent) }
+                    else -> _progress.update { it - block }
+                }
+            }
             "desktop_notification" -> {
                 markAttention(block)
                 val text = fields?.get("body").str() ?: fields?.get("title").str()
@@ -752,6 +847,29 @@ class ServerConnection(
             put("block_id", a)
             put("other_block_id", b)
         })
+    }
+
+    suspend fun keymap(): RexKeymap = parseKeymap(control?.call("client.keymap"))
+
+    fun runAction(
+        sessionId: String,
+        blockId: String?,
+        action: String,
+        args: JsonElement?,
+        onError: (String) -> Unit = {},
+    ) = act(onError) { c ->
+        ensureAttached(sessionId)
+        c.call(
+            "client.action",
+            buildJsonObject {
+                put("action", action)
+                put("session_id", sessionId)
+                if (blockId != null) put("block_id", blockId)
+                if (args != null) put("args", args)
+                put("origin", "palette")
+            },
+            timeoutMs = 30_000,
+        )
     }
 
     suspend fun listHosts(): List<HostEntry> {

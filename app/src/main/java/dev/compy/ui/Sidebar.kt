@@ -52,6 +52,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -285,6 +286,8 @@ private fun ServerSection(
     val attention by connection.attention.collectAsStateWithLifecycle()
     val titles by connection.titles.collectAsStateWithLifecycle()
     val programs by connection.programs.collectAsStateWithLifecycle()
+    val folders by connection.folders.collectAsStateWithLifecycle()
+    val progress by connection.progress.collectAsStateWithLifecycle()
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf(false) }
@@ -373,7 +376,9 @@ private fun ServerSection(
             val matches = query.isBlank() || session.label.contains(query, ignoreCase = true) ||
                 view?.windows?.any { it.displayTitle(titles).contains(query, ignoreCase = true) } == true
             if (matches) {
-                SessionGroup(connection, session, view, selection, query, statuses, attention, titles, programs, session.id in collapsed, app, onOpened, onMessage)
+                CompositionLocalProvider(LocalBlockProgress provides progress) {
+                    SessionGroup(connection, session, view, selection, query, statuses, attention, titles, programs, folders, session.id in collapsed, app, onOpened, onMessage)
+                }
             }
         }
     }
@@ -464,6 +469,7 @@ private fun SessionGroup(
     attention: Set<String>,
     titles: Map<String, String>,
     programs: Map<String, String>,
+    folders: Map<String, String>,
     collapsed: Boolean,
     app: AppState,
     onOpened: () -> Unit,
@@ -509,7 +515,7 @@ private fun SessionGroup(
                 key(window.id) {
                     WindowRow(
                         title = title,
-                        subtitle = window.blocks.firstNotNullOfOrNull { statuses[it.id]?.takeIf { s -> s.isBlocked }?.message },
+                        subtitle = windowSubtitle(window, statuses, folders),
                         selected = selected,
                         tile = { WindowTile(window, statuses, programs, attention) },
                         onClick = {
@@ -523,6 +529,14 @@ private fun SessionGroup(
             }
         }
     }
+}
+
+/** What's most useful under a window's name: what it needs, what it's doing, or where it is. */
+private fun windowSubtitle(window: WindowView, statuses: Map<String, ProgramStatus>, folders: Map<String, String>): String? {
+    val blocks = window.blocks
+    return blocks.firstNotNullOfOrNull { statuses[it.id]?.takeIf { s -> s.isBlocked }?.message }
+        ?: blocks.firstNotNullOfOrNull { statuses[it.id]?.takeIf { s -> s.isWorking }?.message }
+        ?: folders[window.focusedBlockId ?: blocks.firstOrNull()?.id]
 }
 
 @Composable

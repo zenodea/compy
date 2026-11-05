@@ -62,6 +62,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         fun copyText(text: String)
         fun clipboardText(): String?
         fun openUrl(url: String)
+        fun showMessage(text: String)
     }
 
     var host: Host? = null
@@ -143,6 +144,10 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     private var zoom = 1f
     private var panX = 0f
     private var panY = 0f
+
+    private var links: List<TerminalLinks.Link> = emptyList()
+    private var searchActive = false
+    private val highlights = IntArray(128 * 5)
 
     private var sizeChangedAt = 0L
     private var lastCols = 0
@@ -248,6 +253,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             canvas.drawColor(Color.BLACK)
             return
         }
+        if (changed) links = TerminalLinks.find(rowText())
         if (changed && selecting) updateActionMode()
         val cols = meta[GhosttyTerminal.META_COLS]
         val rows = meta[GhosttyTerminal.META_ROWS]
@@ -271,6 +277,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         canvas.translate(padding - panX, padding - panY)
         canvas.scale(s, s)
         for (y in 0 until rows) drawRow(canvas, y, cols, defaultFg, defaultBg)
+        drawLinks(canvas, defaultFg)
+        if (searchActive) drawSearchHighlights(canvas, terminal, cols)
         drawCursor(canvas, cols, rows, defaultFg, defaultBg)
         drawHandles(canvas, s)
         canvas.restore()
@@ -352,6 +360,117 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             drawDecorations(canvas, x, end - x, top, flags, fg)
             x = end
         }
+    }
+
+    /** The screen as one string per row, with one character per column, for finding links. */
+    private fun rowText(): List<String> {
+        val cols = meta[GhosttyTerminal.META_COLS]
+        val rows = meta[GhosttyTerminal.META_ROWS]
+        return List(rows) { y ->
+            buildString(cols) {
+                for (x in 0 until cols) {
+                    val cp = cells[(y * cols + x) * 4]
+                    append(if (cp in 0x21..0xFFFF) cp.toChar() else ' ')
+                }
+            }
+        }
+    }
+
+    private fun drawLinks(canvas: Canvas, defaultFg: Int) {
+        drawLabelledLinks(canvas, defaultFg)
+        if (links.isEmpty()) return
+        fillPaint.color = (defaultFg and 0xFFFFFF) or (0x80 shl 24)
+        val thin = max(1f, density * 0.75f)
+        for (link in links) for (s in link.segments) {
+            val y = s.row * cellH + baseline + thin * 1.5f
+            canvas.drawRect(s.start * cellW, y, (s.end + 1) * cellW, y + thin, fillPaint)
+        }
+    }
+
+    /** Links a program printed with a label: their target isn't on screen, only the cells know. */
+    private fun drawLabelledLinks(canvas: Canvas, defaultFg: Int) {
+        val cols = meta[GhosttyTerminal.META_COLS]
+        val rows = meta[GhosttyTerminal.META_ROWS]
+        val thin = max(1f, density * 0.75f)
+        fillPaint.color = (defaultFg and 0xFFFFFF) or (0x80 shl 24)
+        for (y in 0 until rows) {
+            var x = 0
+            while (x < cols) {
+                if (cells[(y * cols + x) * 4 + 3] and GhosttyTerminal.FLAG_LINK == 0) {
+                    x++
+                    continue
+                }
+                val start = x
+                while (x < cols && cells[(y * cols + x) * 4 + 3] and GhosttyTerminal.FLAG_LINK != 0) x++
+                val top = y * cellH + baseline + thin * 1.5f
+                canvas.drawRect(start * cellW, top, x * cellW, top + thin, fillPaint)
+            }
+        }
+    }
+
+    private fun drawSearchHighlights(canvas: Canvas, terminal: GhosttyTerminal, cols: Int) {
+        val count = terminal.searchHighlights(highlights)
+        for (i in 0 until count) {
+            val at = i * 5
+            val selected = highlights[at + 4] != 0
+            fillPaint.color = if (selected) SEARCH_SELECTED else SEARCH_MATCH
+            for (y in highlights[at + 1]..highlights[at + 3]) {
+                val from = if (y == highlights[at + 1]) highlights[at] else 0
+                val to = if (y == highlights[at + 3]) highlights[at + 2] else cols - 1
+                rect.set(from * cellW, y * cellH, (to + 1) * cellW, (y + 1) * cellH)
+                canvas.drawRoundRect(rect, 2 * density, 2 * density, fillPaint)
+            }
+        }
+    }
+
+    /** Starts or changes a search, jumping to the newest match. Returns how many there are. */
+    fun search(query: String): Int {
+        val terminal = session?.terminal ?: return 0
+        val total = terminal.search(query)
+        searchActive = true
+        if (total > 0) terminal.searchStep(older = true)
+        invalidate()
+        return total
+    }
+
+    /** Moves between matches. Returns the match's index, counted from the newest, or -1. */
+    fun searchStep(older: Boolean): Int {
+        val index = session?.terminal?.searchStep(older) ?: -1
+        invalidate()
+        return index
+    }
+
+    fun clearSearch() {
+        searchActive = false
+        session?.terminal?.searchClear()
+        session?.terminal?.scrollToBottom()
+        invalidate()
+    }
+
+    /** Scrolls to an earlier or later prompt, which needs shell integration. */
+    fun jumpPrompt(delta: Int) {
+        session?.terminal?.scrollPrompt(delta)
+        scrollbarVisibleUntil = SystemClock.uptimeMillis() + 800
+        invalidate()
+    }
+
+    /** Copies the latest command's output. False when the shell doesn't mark command output. */
+    fun copyLastOutput(): Boolean {
+        val terminal = session?.terminal ?: return false
+        if (!terminal.selectLastOutput()) return false
+        val text = terminal.selectionText()
+        terminal.clearSelection()
+        invalidate()
+        if (text.isNullOrEmpty()) return false
+        host?.copyText(text)
+        return true
+    }
+
+    private fun linkAt(col: Int, row: Int): String? {
+        val hyperlink = session?.terminal?.hyperlinkAt(col, row)
+        val url = hyperlink ?: links.firstOrNull { it.contains(col, row) }?.url ?: return null
+        // A program can print any link target, so only ever hand web links to other apps.
+        return url.takeIf { it.startsWith("http://") || it.startsWith("https://") }
     }
 
     private fun appendCell(cp: Int): Int {
@@ -616,10 +735,17 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                 clearSelection()
                 return true
             }
+            val col = cellX(e.x)
+            val row = cellY(e.y)
+            if (meta[GhosttyTerminal.META_MOUSE] == 0) {
+                val url = linkAt(col, row)
+                if (url != null) {
+                    host?.openUrl(url)
+                    return true
+                }
+            }
             host?.onTapped()
             if (meta[GhosttyTerminal.META_MOUSE] != 0) {
-                val col = cellX(e.x)
-                val row = cellY(e.y)
                 host?.sendMouse("press", "left", col, row)
                 host?.sendMouse("release", "left", col, row)
             }
@@ -853,6 +979,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                 menu.add(0, ID_COPY, 0, android.R.string.copy).setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
                 menu.add(0, ID_PASTE, 1, android.R.string.paste).setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
                 menu.add(0, ID_OPEN, 2, "Open link").setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
+                menu.add(0, ID_OUTPUT, 3, "Copy command output").setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
                 return true
             }
 
@@ -862,6 +989,16 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                 when (item.itemId) {
                     ID_COPY -> selectedText()?.let { host?.copyText(it) }
                     ID_PASTE -> host?.clipboardText()?.let { host?.paste(it) }
+                    ID_OUTPUT -> {
+                        val terminal = session?.terminal
+                        val (sx, sy) = ordered()
+                        val text = if (terminal?.selectOutputAt(sx, sy) == true) terminal.selectionText() else null
+                        if (text.isNullOrEmpty()) {
+                            host?.showMessage(NO_OUTPUT_MARKS)
+                        } else {
+                            host?.copyText(text)
+                        }
+                    }
                     ID_OPEN -> selectedText()?.trim()?.let { text ->
                         val url = if (text.startsWith("http://") || text.startsWith("https://")) text else "https://$text"
                         host?.openUrl(url)
@@ -912,5 +1049,9 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         private const val ID_COPY = 1
         private const val ID_PASTE = 2
         private const val ID_OPEN = 3
+        private const val ID_OUTPUT = 4
+        private const val SEARCH_MATCH = 0x66F59E0B
+        private const val SEARCH_SELECTED = 0xB3F97316.toInt()
+        const val NO_OUTPUT_MARKS = "This shell doesn't mark command output. It needs shell integration turned on."
     }
 }

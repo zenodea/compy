@@ -142,10 +142,16 @@ class WorkspaceController(
                 views[target()]?.let { /* typing returns the view to the bottom of its output */ }
             }
             "paste" -> clipboardText()?.let { paste(it) }
+            "prompt" -> focusedView()?.jumpPrompt(def.key.toIntOrNull() ?: return)
         }
     }
 
+    /** Set by the screen so views and commands can show a short message. */
+    var showMessage: (String) -> Unit = {}
+
     fun host(blockId: String, onTap: () -> Unit) = object : TerminalView.Host {
+        override fun showMessage(text: String) = this@WorkspaceController.showMessage(text)
+
         override fun sendKey(key: RexKey) = connection.sendKey(sessionId, blockId, key)
         override fun sendText(text: String) = this@WorkspaceController.sendText(text, blockId)
         override fun paste(text: String) = connection.paste(sessionId, blockId, text)
@@ -176,7 +182,7 @@ class WorkspaceController(
         override fun openUrl(url: String) {
             runCatching {
                 context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            }
+            }.onFailure { this@WorkspaceController.showMessage("No app can open that link") }
         }
     }
 

@@ -52,6 +52,29 @@ class GhosttyTerminal private constructor(private var handle: Long) {
     fun selectionText(): String? = synchronized(lock) { if (handle != 0L) nativeSelectionText(handle) else null }
     fun title(): String? = synchronized(lock) { if (handle != 0L) nativeTitle(handle) else null }
 
+    fun hyperlinkAt(x: Int, y: Int): String? = synchronized(lock) { if (handle != 0L) nativeHyperlinkAt(handle, x, y) else null }
+    fun scrollPrompt(delta: Int) = synchronized(lock) { if (handle != 0L) nativeScrollPrompt(handle, delta) }
+    fun selectOutputAt(x: Int, y: Int) = synchronized(lock) { handle != 0L && nativeSelectOutputAt(handle, x, y) }
+
+    /**
+     * Selects the most recent command output on screen, looking upwards from the bottom row.
+     * False if the shell doesn't mark command output, which needs shell integration.
+     */
+    fun selectLastOutput(): Boolean = synchronized(lock) {
+        if (handle == 0L) return false
+        nativeRender(handle, meta, cells, extras, true)
+        for (y in meta[META_ROWS] - 1 downTo 0) {
+            if (nativeSelectOutputAt(handle, 0, y)) return true
+        }
+        false
+    }
+
+    /** Starts or changes a search, returning how many matches it found. */
+    fun search(needle: String): Int = synchronized(lock) { if (handle != 0L) nativeSearch(handle, needle.toByteArray()) else 0 }
+    fun searchStep(older: Boolean): Int = synchronized(lock) { if (handle != 0L) nativeSearchStep(handle, older) else -1 }
+    fun searchClear() = synchronized(lock) { if (handle != 0L) nativeSearchClear(handle) }
+    fun searchHighlights(out: IntArray): Int = synchronized(lock) { if (handle != 0L) nativeSearchHighlights(handle, out) else 0 }
+
     fun close() = synchronized(lock) {
         if (handle != 0L) nativeFree(handle)
         handle = 0
@@ -89,6 +112,7 @@ class GhosttyTerminal private constructor(private var handle: Long) {
         const val FLAG_SELECTED = 512
         const val FLAG_WIDE = 1024
         const val FLAG_SPACER = 2048
+        const val FLAG_LINK = 4096
 
         init {
             System.loadLibrary("compyterm")
@@ -116,5 +140,12 @@ class GhosttyTerminal private constructor(private var handle: Long) {
         @JvmStatic private external fun nativeClearSelection(h: Long)
         @JvmStatic private external fun nativeSelectionText(h: Long): String?
         @JvmStatic private external fun nativeTitle(h: Long): String?
+        @JvmStatic private external fun nativeHyperlinkAt(h: Long, x: Int, y: Int): String?
+        @JvmStatic private external fun nativeScrollPrompt(h: Long, delta: Int)
+        @JvmStatic private external fun nativeSelectOutputAt(h: Long, x: Int, y: Int): Boolean
+        @JvmStatic private external fun nativeSearch(h: Long, needle: ByteArray): Int
+        @JvmStatic private external fun nativeSearchStep(h: Long, older: Boolean): Int
+        @JvmStatic private external fun nativeSearchClear(h: Long)
+        @JvmStatic private external fun nativeSearchHighlights(h: Long, out: IntArray): Int
     }
 }

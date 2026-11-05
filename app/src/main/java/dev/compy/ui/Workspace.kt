@@ -88,6 +88,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -99,7 +100,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import android.view.HapticFeedbackConstants
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -143,6 +146,19 @@ fun Workspace(
     var cardBounds by remember { mutableStateOf<Rect?>(null) }
     var arranging by rememberSaveable(sessionId) { mutableStateOf(false) }
     var composer by rememberSaveable(sessionId) { mutableStateOf(false) }
+    var palette by rememberSaveable(sessionId) { mutableStateOf(false) }
+    var finding by rememberSaveable(sessionId) { mutableStateOf(false) }
+    val progress by connection.progress.collectAsStateWithLifecycle()
+    controller.showMessage = onMessage
+    val rootView = LocalView.current
+    // A terminal bell is easy to miss on a phone, so feel it when it's from a pane on screen.
+    LaunchedEffect(connection) {
+        connection.bells.collect { block ->
+            if (window?.blocks?.any { it.id == block } == true) {
+                rootView.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+            }
+        }
+    }
 
     LaunchedEffect(window?.focusedBlockId, window?.id) {
         controller.focusedBlockId = window?.focusedBlockId ?: window?.blocks?.firstOrNull()?.id
@@ -171,6 +187,7 @@ fun Workspace(
     val overviewSettled by remember { derivedStateOf { overviewProgress.value >= 1f } }
     val overviewClosed by remember { derivedStateOf { overviewProgress.value == 0f } }
 
+    CompositionLocalProvider(LocalBlockProgress provides progress) {
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         if (overviewShown && view != null) {
             WindowOverview(
@@ -192,7 +209,7 @@ fun Workspace(
         ) {
             if (compact) {
                 Box(Modifier.graphicsLayer { alpha = 1f - overviewProgress.value }) {
-                    CompactTopBar(controller, view, window, onShowSidebar, onOverview = { overview = true }, onArrange = { arranging = true }, onMessage = onMessage)
+                    CompactTopBar(controller, view, window, onShowSidebar, onOverview = { overview = true }, onArrange = { arranging = true }, onMessage = onMessage, onOpenPalette = { palette = true })
                 }
             }
             var lastOffline by remember { mutableStateOf("") }
@@ -283,6 +300,13 @@ fun Workspace(
                             }
                         }
                     }
+                    AnimatedVisibility(
+                        finding,
+                        enter = expandVertically(motion()) + fadeIn(motion(MOTION_SHORT)),
+                        exit = shrinkVertically(motion()) + fadeOut(motion(MOTION_SHORT)),
+                    ) {
+                        FindBar(controller, onClose = { finding = false })
+                    }
                     AnimatedContent(
                         arranging,
                         Modifier.graphicsLayer { alpha = 1f - overviewProgress.value },
@@ -324,6 +348,7 @@ fun Workspace(
                                     keyboardVisible = imeVisible,
                                     onToggleKeyboard = ::toggleKeyboard,
                                     onOpenComposer = { composer = true },
+                                    onOpenPalette = { palette = true },
                                 )
                             }
                         }
@@ -341,6 +366,7 @@ fun Workspace(
                         onArrange = { arranging = true },
                         onShowSidebar = onShowSidebar,
                         onOpenComposer = { composer = true },
+                        onOpenPalette = { palette = true },
                         onMessage = onMessage,
                     )
                 }
@@ -348,8 +374,21 @@ fun Workspace(
         }
     }
 
+    }
+
     if (composer) {
         ComposerSheet(controller, settings.composerSendsEnter, onClose = { composer = false })
+    }
+    if (palette) {
+        CommandPalette(
+            controller, window,
+            onClose = { palette = false },
+            onFind = { finding = true },
+            onOverview = { overview = true },
+            onArrange = { arranging = true },
+            onCompose = { composer = true },
+            onMessage = onMessage,
+        )
     }
 }
 
@@ -377,8 +416,10 @@ private fun CompactTopBar(
     onOverview: () -> Unit,
     onArrange: () -> Unit,
     onMessage: (String) -> Unit,
+    onOpenPalette: () -> Unit,
 ) {
     val connection = controller.connection
+    val folders by connection.folders.collectAsStateWithLifecycle()
     val titles by connection.titles.collectAsStateWithLifecycle()
     val statuses by connection.statuses.collectAsStateWithLifecycle()
     val programs by connection.programs.collectAsStateWithLifecycle()
@@ -398,7 +439,7 @@ private fun CompactTopBar(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                view?.label.orEmpty(),
+                listOfNotNull(view?.label, folders[window?.focusedBlockId]).joinToString(" · "),
                 style = MaterialTheme.typography.labelSmall,
                 color = muted,
                 maxLines = 1,
@@ -406,7 +447,7 @@ private fun CompactTopBar(
             )
         }
         RoundButton(Icons.Rounded.GridView, "All windows", filled = false, tint = muted, onClick = onOverview)
-        ActionsMenu(controller, view, window, onArrange, onMessage, filled = false)
+        ActionsMenu(controller, view, window, onArrange, onMessage, filled = false, onOpenPalette = onOpenPalette)
     }
 }
 
@@ -421,6 +462,7 @@ private fun SideRail(
     onArrange: () -> Unit,
     onShowSidebar: () -> Unit,
     onOpenComposer: () -> Unit,
+    onOpenPalette: () -> Unit,
     onMessage: (String) -> Unit,
 ) {
     Column(
@@ -434,7 +476,7 @@ private fun SideRail(
             RoundButton(Icons.Rounded.ViewSidebar, "Show sessions", onClick = onShowSidebar)
         }
         RoundButton(Icons.Rounded.GridView, "All windows", onClick = onOverview)
-        ActionsMenu(controller, view, window, onArrange, onMessage, filled = true)
+        ActionsMenu(controller, view, window, onArrange, onMessage, filled = true, onOpenPalette = onOpenPalette)
         // With the tab strip hidden, Compose lives here instead.
         AnimatedVisibility(!sidebarHidden, enter = scale, exit = shrink) {
             RoundButton(Icons.Rounded.EditNote, "Compose", onClick = onOpenComposer)
@@ -450,6 +492,7 @@ private fun ActionsMenu(
     onArrange: () -> Unit,
     onMessage: (String) -> Unit,
     filled: Boolean,
+    onOpenPalette: () -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
     var rename by remember { mutableStateOf<RenameTarget?>(null) }
@@ -468,6 +511,14 @@ private fun ActionsMenu(
             tint = if (filled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
         ) { open = true }
         DropdownMenu(open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text("Commands…") },
+                onClick = {
+                    open = false
+                    onOpenPalette()
+                },
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             DropdownMenuItem(
                 text = { Text("Split right") },
                 enabled = focused != null,

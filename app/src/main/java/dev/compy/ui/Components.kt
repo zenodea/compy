@@ -2,14 +2,17 @@ package dev.compy.ui
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
@@ -24,6 +27,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,7 +37,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -49,6 +57,7 @@ internal const val MOTION_LONG = 340
 internal fun <T> motion(duration: Int = MOTION_MEDIUM) = tween<T>(duration, easing = EmphasizedEasing)
 
 /** The one round icon button used across the app. It dips slightly while pressed. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun RoundButton(
     icon: ImageVector,
@@ -58,6 +67,7 @@ fun RoundButton(
     filled: Boolean = true,
     tint: Color = MaterialTheme.colorScheme.onSurface,
     iconRotation: Float = 0f,
+    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -74,7 +84,7 @@ fun RoundButton(
             }
             .clip(CircleShape)
             .then(if (filled) Modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh) else Modifier)
-            .clickable(interactionSource = interaction, indication = ripple(), onClick = onClick),
+            .combinedClickable(interactionSource = interaction, indication = ripple(), onLongClick = onLongClick, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, description, Modifier.size(size * 0.5f).rotate(rotation), tint = shownTint)
@@ -127,6 +137,34 @@ fun StatusDot(blockIds: List<String>, statuses: Map<String, ProgramStatus>, atte
     )
 }
 
+/** Reported progress for each block, in percent, or -1 for busy with no known amount. */
+val LocalBlockProgress = compositionLocalOf<Map<String, Int>> { emptyMap() }
+
+/** A thin ring around a tile, showing how far along a program is. */
+@Composable
+private fun ProgressRing(percent: Int?, size: Dp) {
+    val shown by animateFloatAsState(if (percent == null) 0f else 1f, motion(), label = "ring-alpha")
+    if (shown <= 0.01f) return
+    val sweep by animateFloatAsState(((percent ?: 0).coerceAtLeast(0)) / 100f * 360f, motion(), label = "ring-sweep")
+    val indeterminate = percent == -1
+    val spin by rememberInfiniteTransition(label = "ring").animateFloat(
+        0f, 360f, infiniteRepeatable(tween(1100, easing = LinearEasing)), label = "ring-spin",
+    )
+    val color = MaterialTheme.colorScheme.primary
+    Canvas(Modifier.size(size).graphicsLayer { alpha = shown }) {
+        val stroke = 2.dp.toPx()
+        drawArc(
+            color,
+            startAngle = if (indeterminate) spin else -90f,
+            sweepAngle = if (indeterminate) 90f else sweep,
+            useCenter = false,
+            topLeft = Offset(stroke / 2, stroke / 2),
+            size = Size(this.size.width - stroke, this.size.height - stroke),
+            style = Stroke(stroke, cap = StrokeCap.Round),
+        )
+    }
+}
+
 /** A window's icon tile with its status dot in the corner. */
 @Composable
 fun WindowTile(
@@ -141,12 +179,17 @@ fun WindowTile(
     // A blocked or working agent in any pane is the most useful thing to show.
     val busy = blocks.firstOrNull { statuses[it]?.isBlocked == true } ?: blocks.firstOrNull { statuses[it]?.isWorking == true }
     val shown = busy ?: main
+    val reported = LocalBlockProgress.current
+    val percent = blocks.firstNotNullOfOrNull { statuses[it]?.progress ?: reported[it] }
     Box(contentAlignment = Alignment.TopEnd) {
-        ProgramTile(
-            ProgramNames.candidates(shown?.let { statuses[it]?.app }, shown?.let { programs[it] }),
-            size = size,
-            stacked = blocks.size > 1,
-        )
+        Box(contentAlignment = Alignment.Center) {
+            ProgramTile(
+                ProgramNames.candidates(shown?.let { statuses[it]?.app }, shown?.let { programs[it] }),
+                size = if (percent != null) size - 6.dp else size,
+                stacked = blocks.size > 1,
+            )
+            ProgressRing(percent, size)
+        }
         StatusDot(blocks, statuses, attention, Modifier.padding(0.dp))
     }
 }

@@ -11,6 +11,7 @@ typedef struct {
   GhosttyRenderState rs;
   GhosttyRenderStateRowIterator rows;
   GhosttyRenderStateRowCells cells;
+  GhosttySearch search;
 } Term;
 
 enum {
@@ -21,7 +22,7 @@ enum {
 
 enum { FLAG_BOLD = 1, FLAG_ITALIC = 2, FLAG_FAINT = 4, FLAG_INVERSE = 8, FLAG_INVISIBLE = 16,
        FLAG_STRIKE = 32, FLAG_UNDERLINE = 64, FLAG_OVERLINE = 128, FLAG_BLINK = 256,
-       FLAG_SELECTED = 512, FLAG_WIDE = 1024, FLAG_SPACER = 2048 };
+       FLAG_SELECTED = 512, FLAG_WIDE = 1024, FLAG_SPACER = 2048, FLAG_LINK = 4096 };
 
 static inline jint rgb(GhosttyColorRgb c) {
   return (jint)(0xFF000000u | ((uint32_t)c.r << 16) | ((uint32_t)c.g << 8) | c.b);
@@ -64,6 +65,7 @@ JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeFree(
     JNIEnv* env, jclass cls, jlong handle) {
   Term* h = (Term*)(intptr_t)handle;
   if (!h) return;
+  if (h->search) ghostty_search_free(h->search);
   ghostty_render_state_row_cells_free(h->cells);
   ghostty_render_state_row_iterator_free(h->rows);
   ghostty_render_state_free(h->rs);
@@ -239,6 +241,9 @@ JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeRender(
           ghostty_cell_get(raw, GHOSTTY_CELL_DATA_WIDE, &wide);
           if (wide == GHOSTTY_CELL_WIDE_WIDE) flags |= FLAG_WIDE;
           else if (wide != GHOSTTY_CELL_WIDE_NARROW) flags |= FLAG_SPACER;
+          bool link = false;
+          ghostty_cell_get(raw, GHOSTTY_CELL_DATA_HAS_HYPERLINK, &link);
+          if (link) flags |= FLAG_LINK;
         }
         if (hasSel && x >= sel.start_x && x <= sel.end_x) flags |= FLAG_SELECTED;
         c[0] = cp; c[1] = fg; c[2] = bg; c[3] = flags;
@@ -328,4 +333,113 @@ JNIEXPORT jstring JNICALL Java_dev_compy_term_GhosttyTerminal_nativeTitle(
   jstring out = (*env)->NewStringUTF(env, z);
   free(z);
   return out;
+}
+
+// Returns a cell's OSC 8 hyperlink target, or null when it has none.
+JNIEXPORT jstring JNICALL Java_dev_compy_term_GhosttyTerminal_nativeHyperlinkAt(
+    JNIEnv* env, jclass cls, jlong handle, jint x, jint y) {
+  Term* h = (Term*)(intptr_t)handle;
+  GhosttyGridRef ref;
+  if (!viewport_ref(h, x, y, &ref)) return NULL;
+  uint8_t buf[2048];
+  size_t len = 0;
+  if (ghostty_grid_ref_hyperlink_uri(&ref, buf, sizeof(buf) - 1, &len) != GHOSTTY_SUCCESS || len == 0) return NULL;
+  buf[len] = 0;
+  return (*env)->NewStringUTF(env, (const char*)buf);
+}
+
+JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeScrollPrompt(
+    JNIEnv* env, jclass cls, jlong handle, jint delta) {
+  Term* h = (Term*)(intptr_t)handle;
+  GhosttyTerminalScrollViewport b = {0};
+  b.tag = GHOSTTY_SCROLL_VIEWPORT_DELTA_PROMPT;
+  b.value.delta_prompt = delta;
+  ghostty_terminal_scroll_viewport(h->term, b);
+}
+
+// Selects the command output at a cell. False if the shell hasn't marked output there.
+JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSelectOutputAt(
+    JNIEnv* env, jclass cls, jlong handle, jint x, jint y) {
+  Term* h = (Term*)(intptr_t)handle;
+  GhosttyGridRef ref;
+  if (!viewport_ref(h, x, y, &ref)) return JNI_FALSE;
+  GhosttySelection sel;
+  memset(&sel, 0, sizeof(sel));
+  if (ghostty_terminal_select_output(h->term, ref, &sel) != GHOSTTY_SUCCESS) return JNI_FALSE;
+  return ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_SELECTION, &sel) == GHOSTTY_SUCCESS;
+}
+
+// Starts or changes a search and returns how many matches it found.
+JNIEXPORT jint JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSearch(
+    JNIEnv* env, jclass cls, jlong handle, jbyteArray needle) {
+  Term* h = (Term*)(intptr_t)handle;
+  if (!h->search && ghostty_search_new(NULL, &h->search, h->term) != GHOSTTY_SUCCESS) return 0;
+  jsize len = (*env)->GetArrayLength(env, needle);
+  jbyte* bytes = (*env)->GetByteArrayElements(env, needle, NULL);
+  GhosttyString text = { (const uint8_t*)bytes, (size_t)len };
+  GhosttyResult r = ghostty_search_set(h->search, GHOSTTY_SEARCH_OPT_NEEDLE, &text);
+  if (r == GHOSTTY_SUCCESS) r = ghostty_search_run(h->search);
+  (*env)->ReleaseByteArrayElements(env, needle, bytes, JNI_ABORT);
+  if (r != GHOSTTY_SUCCESS) return 0;
+  size_t total = 0;
+  ghostty_search_get(h->search, GHOSTTY_SEARCH_DATA_TOTAL_MATCHES, &total);
+  return (jint)total;
+}
+
+// Moves to the next or previous match, scrolling to it. Returns its index, or -1.
+JNIEXPORT jint JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSearchStep(
+    JNIEnv* env, jclass cls, jlong handle, jboolean older) {
+  Term* h = (Term*)(intptr_t)handle;
+  if (!h->search) return -1;
+  GhosttyResult r = ghostty_search_set(h->search, older ? GHOSTTY_SEARCH_OPT_SELECT_NEXT : GHOSTTY_SEARCH_OPT_SELECT_PREV, NULL);
+  if (r != GHOSTTY_SUCCESS) return -1;
+  size_t index = 0;
+  if (ghostty_search_get(h->search, GHOSTTY_SEARCH_DATA_SELECTED_INDEX, &index) != GHOSTTY_SUCCESS) return -1;
+  return (jint)index;
+}
+
+JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSearchClear(
+    JNIEnv* env, jclass cls, jlong handle) {
+  Term* h = (Term*)(intptr_t)handle;
+  if (h->search) ghostty_search_free(h->search);
+  h->search = NULL;
+}
+
+static bool match_points(Term* h, const GhosttySelection* m, GhosttyPointCoordinate* a, GhosttyPointCoordinate* b) {
+  return ghostty_terminal_point_from_grid_ref(h->term, &m->start, GHOSTTY_POINT_TAG_VIEWPORT, a) == GHOSTTY_SUCCESS &&
+         ghostty_terminal_point_from_grid_ref(h->term, &m->end, GHOSTTY_POINT_TAG_VIEWPORT, b) == GHOSTTY_SUCCESS;
+}
+
+// Writes on-screen matches as start x, start y, end x, end y, selected. Returns how many it wrote.
+JNIEXPORT jint JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSearchHighlights(
+    JNIEnv* env, jclass cls, jlong handle, jintArray out) {
+  Term* h = (Term*)(intptr_t)handle;
+  if (!h->search || ghostty_search_feed(h->search) != GHOSTTY_SUCCESS) return 0;
+  GhosttySelection storage[128];
+  GhosttySelectionBuffer buffer = { .ptr = storage, .cap = 128 };
+  GhosttyResult r = ghostty_search_get(h->search, GHOSTTY_SEARCH_DATA_VIEWPORT_MATCHES, &buffer);
+  if (r != GHOSTTY_SUCCESS && r != GHOSTTY_OUT_OF_SPACE) return 0;
+  size_t found = buffer.len < 128 ? buffer.len : 128;
+
+  GhosttyPointCoordinate selectedStart = {0}, selectedEnd = {0};
+  GhosttySelection selected;
+  memset(&selected, 0, sizeof(selected));
+  bool hasSelected = ghostty_search_get(h->search, GHOSTTY_SEARCH_DATA_SELECTED_MATCH, &selected) == GHOSTTY_SUCCESS &&
+                     match_points(h, &selected, &selectedStart, &selectedEnd);
+
+  uint16_t rows = 0;
+  ghostty_terminal_get(h->term, GHOSTTY_TERMINAL_DATA_ROWS, &rows);
+  jsize cap = (*env)->GetArrayLength(env, out) / 5;
+  jint* values = (*env)->GetIntArrayElements(env, out, NULL);
+  jint count = 0;
+  for (size_t i = 0; i < found && count < cap; i++) {
+    GhosttyPointCoordinate a, b;
+    if (!match_points(h, &storage[i], &a, &b) || a.y >= rows || b.y >= rows) continue;
+    jint* v = values + (size_t)count * 5;
+    v[0] = a.x; v[1] = (jint)a.y; v[2] = b.x; v[3] = (jint)b.y;
+    v[4] = hasSelected && a.x == selectedStart.x && a.y == selectedStart.y && b.x == selectedEnd.x && b.y == selectedEnd.y;
+    count++;
+  }
+  (*env)->ReleaseIntArrayElements(env, out, values, 0);
+  return count;
 }

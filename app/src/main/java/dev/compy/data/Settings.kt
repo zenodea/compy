@@ -91,6 +91,8 @@ object DefaultKeyBar {
         KeyDef("key", "^D", key = "key_d", mods = "ctrl"),
         KeyDef("key", "^Z", key = "key_z", mods = "ctrl"),
         KeyDef("key", "⇧⇥", key = "tab", mods = "shift"),
+        KeyDef("prompt", "Previous prompt", icon = "prompt-up", key = "-1"),
+        KeyDef("prompt", "Next prompt", icon = "prompt-down", key = "1"),
     )
 
     private fun pick(vararg labels: String) = labels.map { l -> catalog.first { it.label == l } }
@@ -98,7 +100,7 @@ object DefaultKeyBar {
     val pages: List<List<KeyDef>> = listOf(
         pick("esc", "ctrl", "opt", "tab", "←", "↓", "↑", "→"),
         pick("Paste", "^C", "^D", "⇧⇥", "/", "|", "-", "~"),
-        pick("home", "end", "pgup", "pgdn", "del", "shift"),
+        pick("home", "end", "pgup", "pgdn", "del", "shift", "Previous prompt", "Next prompt"),
     )
 }
 
