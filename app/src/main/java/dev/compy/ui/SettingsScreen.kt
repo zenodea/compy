@@ -6,6 +6,15 @@ import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -69,10 +78,20 @@ import java.io.File
 fun SettingsScreen(app: AppState, onBack: () -> Unit) {
     var keyBarEditor by remember { mutableStateOf(false) }
     BackHandler { if (keyBarEditor) keyBarEditor = false else onBack() }
-    if (keyBarEditor) {
-        KeyBarEditor(app, onBack = { keyBarEditor = false })
-    } else {
-        SettingsList(app, onBack, onEditKeyBar = { keyBarEditor = true })
+    AnimatedContent(
+        keyBarEditor,
+        transitionSpec = {
+            val direction = if (targetState) 1 else -1
+            (slideInHorizontally(motion()) { direction * it / 4 } + fadeIn(motion(MOTION_SHORT))) togetherWith
+                (slideOutHorizontally(motion()) { -direction * it / 8 } + fadeOut(motion(MOTION_SHORT)))
+        },
+        label = "settings",
+    ) { editing ->
+        if (editing) {
+            KeyBarEditor(app, onBack = { keyBarEditor = false })
+        } else {
+            SettingsList(app, onBack, onEditKeyBar = { keyBarEditor = true })
+        }
     }
 }
 
@@ -163,7 +182,11 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
             item {
                 Group("Appearance") {
                     Segments(listOf("host" to "Match terminal", "wallpaper" to "Wallpaper"), settings.appColors) { v -> update { it.copy(appColors = v) } }
-                    if (settings.appColors == "wallpaper") {
+                    AnimatedVisibility(
+                        settings.appColors == "wallpaper",
+                        enter = expandVertically(motion()) + fadeIn(motion(MOTION_SHORT)),
+                        exit = shrinkVertically(motion()) + fadeOut(motion(MOTION_SHORT)),
+                    ) {
                         Segments(listOf("system" to "System", "light" to "Light", "dark" to "Dark"), settings.themeMode) { v -> update { it.copy(themeMode = v) } }
                     }
                     SwitchRow("AMOLED black", "Use a pure black canvas with dark colors", settings.amoled) { v -> update { it.copy(amoled = v) } }

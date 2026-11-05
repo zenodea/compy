@@ -7,10 +7,15 @@ import androidx.compose.ui.graphics.graphicsLayer
 import kotlinx.coroutines.CancellationException
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -71,26 +76,61 @@ fun CompyRoot(app: AppState, activity: FragmentActivity) {
     LaunchedEffect(Unit) { app.unlock() }
 
     var screen by rememberSaveable { mutableStateOf(Screen.Main) }
+    // Kept here so returning from Settings lands back where you were.
+    // Reopen where you left off; the session list is one back gesture away.
+    var showList by rememberSaveable { mutableStateOf(app.selection.value == null) }
+    var sidebarOpen by rememberSaveable { mutableStateOf(true) }
     val snackbars = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val showMessage: (String) -> Unit = { message -> scope.launch { snackbars.showSnackbar(message) } }
 
+    val current = if (servers.isEmpty()) Screen.AddServer else screen
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        when {
-            servers.isEmpty() || screen == Screen.AddServer -> AddServerScreen(
-                app,
-                canGoBack = servers.isNotEmpty(),
-                onDone = { screen = Screen.Main },
-            )
-            screen == Screen.Settings -> SettingsScreen(app, onBack = { screen = Screen.Main })
-            else -> MainLayout(app, onOpenSettings = { screen = Screen.Settings }, onAddServer = { screen = Screen.AddServer }, onMessage = showMessage)
+        AnimatedContent(
+            current,
+            transitionSpec = {
+                // Going deeper slides in from the right, and going back reverses it.
+                val forward = targetState.ordinal > initialState.ordinal
+                val direction = if (forward) 1 else -1
+                (slideInHorizontally(motion()) { direction * it / 4 } + fadeIn(motion(MOTION_SHORT))) togetherWith
+                    (slideOutHorizontally(motion()) { -direction * it / 8 } + fadeOut(motion(MOTION_SHORT)))
+            },
+            label = "screen",
+        ) { shown ->
+            when (shown) {
+                Screen.AddServer -> AddServerScreen(
+                    app,
+                    canGoBack = servers.isNotEmpty(),
+                    onDone = { screen = Screen.Main },
+                )
+                Screen.Settings -> SettingsScreen(app, onBack = { screen = Screen.Main })
+                Screen.Main -> MainLayout(
+                    app,
+                    showList = showList,
+                    onShowList = { showList = it },
+                    sidebarOpen = sidebarOpen,
+                    onSidebarOpen = { sidebarOpen = it },
+                    onOpenSettings = { screen = Screen.Settings },
+                    onAddServer = { screen = Screen.AddServer },
+                    onMessage = showMessage,
+                )
+            }
         }
         SnackbarHost(snackbars, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()) { Snackbar(it) }
     }
 }
 
 @Composable
-private fun MainLayout(app: AppState, onOpenSettings: () -> Unit, onAddServer: () -> Unit, onMessage: (String) -> Unit) {
+private fun MainLayout(
+    app: AppState,
+    showList: Boolean,
+    onShowList: (Boolean) -> Unit,
+    sidebarOpen: Boolean,
+    onSidebarOpen: (Boolean) -> Unit,
+    onOpenSettings: () -> Unit,
+    onAddServer: () -> Unit,
+    onMessage: (String) -> Unit,
+) {
     val connections by app.connections.collectAsStateWithLifecycle()
     val selection by app.selection.collectAsStateWithLifecycle()
     val connection = selection?.let { connections[it.serverId] }
@@ -105,7 +145,7 @@ private fun MainLayout(app: AppState, onOpenSettings: () -> Unit, onAddServer: (
                     c.views.value[alert.sessionId]?.activeWindow?.focusedBlockId == alert.blockId
                 if (!focused) {
                     alertScope.launch {
-                        val result = alertHost.showSnackbar(alert.text, actionLabel = "Open", duration = SnackbarDuration.Long)
+                        val result = alertHost.showSnackbar(alert.text, actionLabel = "Open", duration = SnackbarDuration.Short)
                         if (result == SnackbarResult.ActionPerformed) {
                             app.requestOpen(dev.compy.Selection(alert.serverId, alert.sessionId))
                             c.focusBlock(alert.sessionId, alert.blockId)
@@ -128,69 +168,91 @@ private fun MainLayout(app: AppState, onOpenSettings: () -> Unit, onAddServer: (
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val compact = maxWidth < 600.dp
         val sidebarWidth = if (maxWidth < 840.dp) 280.dp else 320.dp
-        var sidebarOpen by rememberSaveable { mutableStateOf(true) }
-        // Reopen where you left off; the session list is one back gesture away.
-        var showList by rememberSaveable { mutableStateOf(sessionId == null) }
-        LaunchedEffect(Unit) { app.openRequests.collect { showList = false } }
-        LaunchedEffect(sessionId) { if (sessionId == null) showList = true }
+        LaunchedEffect(Unit) { app.openRequests.collect { onShowList(false) } }
+        LaunchedEffect(sessionId) { if (sessionId == null) onShowList(true) }
         if (compact) {
             val inWorkspace = !showList && connection != null && sessionId != null
-            val back = remember { Animatable(0f) }
-            // The workspace follows the back gesture, showing the session list underneath.
+            // Keep drawing the workspace while it slides away, even after its session has gone.
+            var shownConnection by remember { mutableStateOf(connection) }
+            var shownSession by remember { mutableStateOf(sessionId) }
+            if (connection != null && sessionId != null) {
+                shownConnection = connection
+                shownSession = sessionId
+            }
+            // 1 shows the workspace and 0 the session list. The back gesture drives it directly.
+            val position = remember { Animatable(if (inWorkspace) 1f else 0f) }
+            var gesturing by remember { mutableStateOf(false) }
+            LaunchedEffect(inWorkspace) {
+                if (!gesturing) position.animateTo(if (inWorkspace) 1f else 0f, motion(MOTION_LONG))
+            }
             PredictiveBackHandler(enabled = inWorkspace) { progress ->
+                gesturing = true
+                var committed = false
                 try {
-                    progress.collect { back.snapTo(it.progress) }
-                    showList = true
-                    back.snapTo(0f)
+                    progress.collect { position.snapTo(1f - it.progress * 0.4f) }
+                    committed = true
+                    gesturing = false
+                    // This disables the handler and ends this block; the effect above slides away.
+                    onShowList(true)
                 } catch (e: CancellationException) {
-                    back.animateTo(0f)
+                    gesturing = false
+                    if (!committed) alertScope.launch { position.animateTo(1f, motion(MOTION_MEDIUM)) }
                     throw e
                 }
             }
-            if (!inWorkspace || back.value > 0f) {
-                Sidebar(
-                    app, Modifier.fillMaxSize(),
-                    onOpenSettings = onOpenSettings,
-                    onAddServer = onAddServer,
-                    onOpened = { showList = false },
-                    onMessage = onMessage,
-                )
-            }
-            if (inWorkspace) {
+            if (position.value < 1f) {
                 Box(
                     Modifier
                         .fillMaxSize()
                         .graphicsLayer {
-                            val p = back.value
-                            translationX = size.width * 0.25f * p
-                            scaleX = 1f - 0.1f * p
-                            scaleY = 1f - 0.1f * p
-                            shape = RoundedCornerShape(28.dp * p)
+                            translationX = -size.width * 0.18f * position.value
+                            alpha = 1f - 0.3f * position.value
+                        },
+                ) {
+                    Sidebar(
+                        app, Modifier.fillMaxSize(),
+                        onOpenSettings = onOpenSettings,
+                        onAddServer = onAddServer,
+                        onOpened = { onShowList(false) },
+                        onMessage = onMessage,
+                    )
+                }
+            }
+            val workspaceConnection = shownConnection
+            val workspaceSession = shownSession
+            if ((inWorkspace || position.value > 0f) && workspaceConnection != null && workspaceSession != null) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            val p = 1f - position.value
+                            translationX = size.width * p
+                            shape = RoundedCornerShape(28.dp * minOf(1f, p * 4f))
                             clip = p > 0f
                         },
                 ) {
-                    Workspace(app, connection!!, sessionId!!, compact = true, onShowSidebar = { showList = true }, onMessage = onMessage)
+                    Workspace(app, workspaceConnection, workspaceSession, compact = true, onShowSidebar = { onShowList(true) }, onMessage = onMessage)
                 }
             }
         } else {
             Row(Modifier.fillMaxSize()) {
                 AnimatedVisibility(
                     sidebarOpen,
-                    enter = expandHorizontally(tween(220)),
-                    exit = shrinkHorizontally(tween(220)),
+                    enter = expandHorizontally(motion()) + fadeIn(motion(MOTION_SHORT)),
+                    exit = shrinkHorizontally(motion()) + fadeOut(motion(MOTION_SHORT)),
                 ) {
                     Sidebar(
                         app, Modifier.width(sidebarWidth),
                         onOpenSettings = onOpenSettings,
                         onAddServer = onAddServer,
-                        onOpened = { showList = false },
+                        onOpened = { onShowList(false) },
                         onMessage = onMessage,
-                        onHideSidebar = { sidebarOpen = false },
+                        onHideSidebar = { onSidebarOpen(false) },
                     )
                 }
                 Box(Modifier.weight(1f)) {
                     if (connection != null && sessionId != null) {
-                        Workspace(app, connection, sessionId, compact = false, sidebarHidden = !sidebarOpen, onShowSidebar = { sidebarOpen = true }, onMessage = onMessage)
+                        Workspace(app, connection, sessionId, compact = false, sidebarHidden = !sidebarOpen, onShowSidebar = { onSidebarOpen(true) }, onMessage = onMessage)
                     } else {
                         EmptyWorkspace()
                     }

@@ -144,6 +144,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     private var panX = 0f
     private var panY = 0f
 
+    private var sizeChangedAt = 0L
     private var scrollRemainder = 0f
     private val scroller = OverScroller(context)
     private var lastFlingY = 0
@@ -187,6 +188,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
+        sizeChangedAt = SystemClock.uptimeMillis()
+        postInvalidateDelayed(SIZE_SETTLE_MS + 16)
         reportGrid()
     }
 
@@ -201,6 +204,9 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
 
     private fun scale(cols: Int, rows: Int): Float {
         if (cols <= 0 || rows <= 0 || width <= 0 || height <= 0) return 1f
+        // While a pane is moving or the keyboard slides, keep the text steady until it settles,
+        // when the terminal will have been resized to fit.
+        if (interactive && !keepSize && SystemClock.uptimeMillis() - sizeChangedAt < SIZE_SETTLE_MS) return 1f
         val w = cols * cellW + padding * 2
         val h = rows * cellH + padding * 2
         val fit = min(width / w, height / h)
@@ -428,10 +434,12 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         val barH = max(h * len / total, 24 * density)
         val top = (h - barH) * offset / max(1, total - len)
         val w = 3 * density
-        fillPaint.color = (meta[GhosttyTerminal.META_FG] and 0xFFFFFF) or (0x80 shl 24)
+        val remaining = scrollbarVisibleUntil - now
+        val alpha = (0x80 * min(1f, remaining.toFloat() / SCROLLBAR_FADE_MS)).toInt()
+        fillPaint.color = (meta[GhosttyTerminal.META_FG] and 0xFFFFFF) or (alpha shl 24)
         rect.set(width - w - 2 * density, top, width - 2 * density, top + barH)
         canvas.drawRoundRect(rect, w, w, fillPaint)
-        postInvalidateDelayed(scrollbarVisibleUntil - now + 16)
+        if (remaining > SCROLLBAR_FADE_MS) postInvalidateDelayed(remaining - SCROLLBAR_FADE_MS) else postInvalidateOnAnimation()
     }
 
     private fun snap(v: Float) = Math.round(v).toFloat()
@@ -877,6 +885,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         const val MIN_FONT = 6f
         const val MAX_FONT = 32f
         private const val MAX_ZOOM = 4f
+        private const val SIZE_SETTLE_MS = 450L
+        private const val SCROLLBAR_FADE_MS = 250L
         private const val MAX_ARROWS_PER_MOVE = 8
         private const val BLINK_MS = 530L
         private const val HANDLE_RADIUS_DP = 6f

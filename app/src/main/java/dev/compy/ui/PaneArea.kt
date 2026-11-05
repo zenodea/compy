@@ -1,5 +1,14 @@
 package dev.compy.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -17,6 +26,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -28,12 +38,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.compy.data.SizeMode
 import dev.compy.rex.FractionRect
@@ -82,7 +94,10 @@ private fun firstLeaf(node: LayoutNode): String = when (node) {
     is LayoutNode.Split -> firstLeaf(node.before)
 }
 
-/** Lays out a window's panes exactly as Rex describes them, with draggable dividers. */
+/**
+ * Lays out a window's panes exactly as Rex describes them, with draggable dividers. Panes glide to
+ * new positions, and a pane's real size only goes to the server once it has settled.
+ */
 @Composable
 fun PaneArea(
     controller: WorkspaceController,
@@ -90,10 +105,13 @@ fun PaneArea(
     modifier: Modifier = Modifier,
     onPaneTapped: (String) -> Unit,
     arranging: Boolean = false,
+    enabled: Boolean = true,
     onDrop: (dragged: String, target: String, zone: DropZone) -> Unit = { _, _, _ -> },
 ) {
     val tiled = window.layers.firstOrNull { !it.floating }
     val overrides = remember(window.id) { mutableStateMapOf<String, Float>() }
+    // Panes already here when the window opens shouldn't animate in.
+    val known = remember(window.id) { mutableSetOf<String>() }
     BoxWithConstraints(modifier) {
         val fullW = maxWidth
         val fullH = maxHeight
@@ -101,21 +119,33 @@ fun PaneArea(
         val panes = mutableListOf<Pair<String, FractionRect>>()
         val splits = mutableListOf<PlacedSplit>()
         val whole = FractionRect(0f, 0f, 1f, 1f)
-        if (zoomed != null) {
-            panes += zoomed to whole
-        } else {
-            tiled?.layout?.let { place(it, whole, overrides, panes, splits) }
-        }
-        val multiple = panes.size > 1
+        tiled?.layout?.let { place(it, whole, overrides, panes, splits) }
+        if (zoomed != null && panes.none { it.first == zoomed }) panes += zoomed to whole
+        val multiple = zoomed == null && panes.size > 1
+        val dragging = overrides.isNotEmpty()
+        val firstLayout = known.isEmpty()
+        val inset by animateDpAsState(if (multiple) Gap / 2 else 0.dp, motion(), label = "inset")
         panes.forEach { (blockId, rect) ->
             key(blockId) {
-                Box(paneModifier(rect, fullW, fullH, if (multiple) Gap / 2 else 0.dp)) {
+                val isNew = !firstLayout && blockId !in known
+                SideEffect { known += blockId }
+                val visible = zoomed == null || zoomed == blockId
+                AnimatedPane(
+                    target = if (zoomed == blockId) whole else rect,
+                    visible = visible,
+                    onTop = zoomed == blockId,
+                    snap = dragging,
+                    animateIn = isNew,
+                    fullW = fullW,
+                    fullH = fullH,
+                    inset = inset,
+                ) {
                     TerminalPane(
                         controller = controller,
                         blockId = blockId,
                         focused = blockId == controller.focusedBlockId,
                         showFocusRing = multiple,
-                        interactive = !arranging,
+                        interactive = !arranging && enabled && visible,
                         onTapped = { onPaneTapped(blockId) },
                     )
                 }
@@ -128,13 +158,13 @@ fun PaneArea(
                 layer.layout?.let { place(it, layer.bounds, overrides, inner, mutableListOf()) }
                 inner.forEach { (blockId, rect) ->
                     key(blockId) {
-                        Box(paneModifier(rect, fullW, fullH, Gap / 2)) {
+                        Box(paneModifier(rect, fullW, fullH, Gap / 2).zIndex(2f)) {
                             TerminalPane(
                                 controller = controller,
                                 blockId = blockId,
                                 focused = blockId == controller.focusedBlockId,
                                 showFocusRing = true,
-                                interactive = !arranging,
+                                interactive = !arranging && enabled,
                                 onTapped = { onPaneTapped(blockId) },
                             )
                         }
@@ -142,7 +172,7 @@ fun PaneArea(
                 }
             }
         }
-        if (!arranging) {
+        if (!arranging && zoomed == null) {
             splits.forEach { placed ->
                 key(placed.split.splitId) {
                     SplitHandle(placed, fullW, fullH, onDrag = { ratio ->
@@ -157,16 +187,49 @@ fun PaneArea(
             }
             // Once the server reports the new ratio, drop the local one.
             LaunchedEffect(window) {
-                val known = splits.associateBy { it.split.splitId }
+                val server = splits.associateBy { it.split.splitId }
                 overrides.keys.toList().forEach { id ->
-                    val server = known[id]?.split?.ratio
-                    if (server == null || kotlin.math.abs(server - (overrides[id] ?: server)) < 0.01f) overrides.remove(id)
+                    val ratio = server[id]?.split?.ratio
+                    if (ratio == null || kotlin.math.abs(ratio - (overrides[id] ?: ratio)) < 0.01f) overrides.remove(id)
                 }
             }
-        } else {
+        } else if (arranging) {
             ArrangeOverlay(panes, fullW, fullH, onDrop)
         }
     }
+}
+
+/** One pane's place in the window: it glides to new positions and fades when hidden by a zoom. */
+@Composable
+private fun AnimatedPane(
+    target: FractionRect,
+    visible: Boolean,
+    onTop: Boolean,
+    snap: Boolean,
+    animateIn: Boolean,
+    fullW: Dp,
+    fullH: Dp,
+    inset: Dp,
+    content: @Composable () -> Unit,
+) {
+    val spec: AnimationSpec<Float> = if (snap) snap() else motion()
+    val x by animateFloatAsState(target.x, spec, label = "pane-x")
+    val y by animateFloatAsState(target.y, spec, label = "pane-y")
+    val w by animateFloatAsState(target.w, spec, label = "pane-w")
+    val h by animateFloatAsState(target.h, spec, label = "pane-h")
+    val fade by animateFloatAsState(if (visible) 1f else 0f, motion(MOTION_SHORT), label = "pane-fade")
+    val enter = remember { Animatable(if (animateIn) 0f else 1f) }
+    LaunchedEffect(Unit) { enter.animateTo(1f, motion()) }
+    Box(
+        paneModifier(FractionRect(x, y, w, h), fullW, fullH, inset)
+            .zIndex(if (onTop) 1f else 0f)
+            .graphicsLayer {
+                alpha = fade * enter.value
+                val scale = 0.94f + 0.06f * enter.value
+                scaleX = scale
+                scaleY = scale
+            },
+    ) { content() }
 }
 
 private fun paneModifier(rect: FractionRect, w: Dp, h: Dp, inset: Dp): Modifier =
@@ -341,16 +404,22 @@ fun TerminalPane(
     val state by session.liveState.collectAsState()
     val fallback by session.fallbackInUse.collectAsState()
     val scheme = MaterialTheme.colorScheme
-    val colors = remember(settings.terminalTheme, scheme) { TerminalThemes.colors(settings.terminalTheme, scheme) }
+    // Only the Material You theme depends on the app's colors, which change during a fade.
+    val themeKey: Any = if (settings.terminalTheme == "material") scheme else settings.terminalTheme
+    val colors = remember(settings.terminalTheme, themeKey) { TerminalThemes.colors(settings.terminalTheme, scheme) }
     LaunchedEffect(session, colors) { session.setLocalTheme(colors) }
     val latestTap = rememberUpdated(onTapped)
-    val ringColor = scheme.primary
+    val ringColor by animateColorAsState(
+        if (showFocusRing && focused) scheme.primary.copy(alpha = 0.75f) else Color.Transparent,
+        motion(MOTION_SHORT),
+        label = "focus-ring",
+    )
 
     Box(
         Modifier
             .fillMaxSize()
             .clip(PaneShape)
-            .then(if (showFocusRing && focused) Modifier.border(1.dp, ringColor.copy(alpha = 0.75f), PaneShape) else Modifier),
+            .border(1.dp, ringColor, PaneShape),
     ) {
         AndroidView(
             modifier = Modifier
@@ -390,18 +459,23 @@ fun TerminalPane(
                 )
             }
         }
-        if (state != TerminalSession.State.Live) {
-            Surface(
-                Modifier.align(Alignment.TopEnd).padding(8.dp),
-                shape = CircleShape,
-                color = scheme.secondaryContainer,
-            ) {
+        AnimatedVisibility(
+            state != TerminalSession.State.Live,
+            Modifier.align(Alignment.TopEnd).padding(8.dp),
+            enter = fadeIn(motion(MOTION_SHORT)),
+            exit = fadeOut(motion(MOTION_SHORT)),
+        ) {
+            // While fading out the state is already Live, so keep showing the last message.
+            var message by remember { mutableStateOf("Connecting…") }
+            when (state) {
+                TerminalSession.State.Connecting -> message = "Connecting…"
+                TerminalSession.State.Reconnecting -> message = "Reconnecting…"
+                TerminalSession.State.Closed -> message = "Closed"
+                TerminalSession.State.Live -> Unit
+            }
+            Surface(shape = CircleShape, color = scheme.secondaryContainer) {
                 Text(
-                    when (state) {
-                        TerminalSession.State.Connecting -> "Connecting…"
-                        TerminalSession.State.Reconnecting -> "Reconnecting…"
-                        else -> "Closed"
-                    },
+                    message,
                     Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                     style = MaterialTheme.typography.labelSmall,
                     color = scheme.onSecondaryContainer,

@@ -2,6 +2,8 @@ package dev.compy.ui
 
 import android.app.Activity
 import android.content.Context
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
@@ -15,8 +17,12 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
@@ -59,18 +65,27 @@ fun CompyTheme(settings: Settings, hostColors: TerminalColors?, content: @Compos
         else -> systemDark
     }
     val context = LocalContext.current
-    val scheme = remember(dark, settings.dynamicColor, settings.amoled, hostColors) {
+    val target = remember(dark, settings.dynamicColor, settings.amoled, hostColors) {
         if (hostColors != null) {
             schemeFromTerminal(hostColors, settings.amoled)
         } else {
             wallpaperScheme(context, dark, settings.dynamicColor, settings.amoled)
         }
     }
+    // Fade to new colors instead of snapping, such as when a host's theme arrives.
+    var scheme by remember { mutableStateOf(target) }
+    LaunchedEffect(target) {
+        val from = scheme
+        if (from == target) return@LaunchedEffect
+        val progress = Animatable(0f)
+        progress.animateTo(1f, tween(MOTION_LONG)) { scheme = lerpScheme(from, target, value) }
+        scheme = target
+    }
     val view = LocalView.current
     SideEffect {
         val window = (view.context as? Activity)?.window ?: return@SideEffect
         val controller = WindowCompat.getInsetsController(window, view)
-        val lightBars = scheme.background.luminance() > 0.5f
+        val lightBars = target.background.luminance() > 0.5f
         controller.isAppearanceLightStatusBars = lightBars
         controller.isAppearanceLightNavigationBars = lightBars
     }
@@ -88,6 +103,36 @@ fun CompyTheme(settings: Settings, hostColors: TerminalColors?, content: @Compos
         CompositionLocalProvider(LocalContentColor provides scheme.onSurface, content = content)
     }
 }
+
+private fun lerpScheme(a: ColorScheme, b: ColorScheme, t: Float): ColorScheme = b.copy(
+    primary = lerp(a.primary, b.primary, t),
+    onPrimary = lerp(a.onPrimary, b.onPrimary, t),
+    primaryContainer = lerp(a.primaryContainer, b.primaryContainer, t),
+    onPrimaryContainer = lerp(a.onPrimaryContainer, b.onPrimaryContainer, t),
+    secondary = lerp(a.secondary, b.secondary, t),
+    onSecondary = lerp(a.onSecondary, b.onSecondary, t),
+    secondaryContainer = lerp(a.secondaryContainer, b.secondaryContainer, t),
+    onSecondaryContainer = lerp(a.onSecondaryContainer, b.onSecondaryContainer, t),
+    tertiary = lerp(a.tertiary, b.tertiary, t),
+    tertiaryContainer = lerp(a.tertiaryContainer, b.tertiaryContainer, t),
+    onTertiaryContainer = lerp(a.onTertiaryContainer, b.onTertiaryContainer, t),
+    background = lerp(a.background, b.background, t),
+    onBackground = lerp(a.onBackground, b.onBackground, t),
+    surface = lerp(a.surface, b.surface, t),
+    onSurface = lerp(a.onSurface, b.onSurface, t),
+    surfaceVariant = lerp(a.surfaceVariant, b.surfaceVariant, t),
+    onSurfaceVariant = lerp(a.onSurfaceVariant, b.onSurfaceVariant, t),
+    error = lerp(a.error, b.error, t),
+    errorContainer = lerp(a.errorContainer, b.errorContainer, t),
+    onErrorContainer = lerp(a.onErrorContainer, b.onErrorContainer, t),
+    outline = lerp(a.outline, b.outline, t),
+    outlineVariant = lerp(a.outlineVariant, b.outlineVariant, t),
+    surfaceContainerLowest = lerp(a.surfaceContainerLowest, b.surfaceContainerLowest, t),
+    surfaceContainerLow = lerp(a.surfaceContainerLow, b.surfaceContainerLow, t),
+    surfaceContainer = lerp(a.surfaceContainer, b.surfaceContainer, t),
+    surfaceContainerHigh = lerp(a.surfaceContainerHigh, b.surfaceContainerHigh, t),
+    surfaceContainerHighest = lerp(a.surfaceContainerHighest, b.surfaceContainerHighest, t),
+)
 
 private fun wallpaperScheme(context: Context, dark: Boolean, dynamic: Boolean, amoled: Boolean): ColorScheme {
     val base = when {

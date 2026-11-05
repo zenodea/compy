@@ -1,11 +1,19 @@
 package dev.compy.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -19,6 +27,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -26,7 +35,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ExpandLess
-import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Laptop
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.Search
@@ -47,6 +55,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -123,42 +132,80 @@ fun Sidebar(
     ) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 8.dp, bottom = 4.dp),
-            horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ToolPill(
-                activityOn = settings.activityMode,
-                onToggleActivity = { app.updateSettings { it.copy(activityMode = !it.activityMode) } },
-                searching = searching,
-                query = query,
-                onQuery = { query = it },
-                onStartSearch = { searching = true },
-                onStopSearch = {
-                    searching = false
-                    query = ""
-                },
-                onOpenSettings = onOpenSettings,
-                modifier = if (searching) Modifier.weight(1f) else Modifier,
-            )
+            BoxWithConstraints(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
+                val pillWidth by animateDpAsState(if (searching) maxWidth else 120.dp, motion(), label = "search")
+                ToolPill(
+                    activityOn = settings.activityMode,
+                    onToggleActivity = { app.updateSettings { it.copy(activityMode = !it.activityMode) } },
+                    searching = searching,
+                    query = query,
+                    onQuery = { query = it },
+                    onStartSearch = { searching = true },
+                    onStopSearch = {
+                        searching = false
+                        query = ""
+                    },
+                    onOpenSettings = onOpenSettings,
+                    modifier = Modifier.width(pillWidth),
+                )
+            }
             if (onHideSidebar != null) {
                 Spacer(Modifier.width(8.dp))
                 RoundButton(Icons.Rounded.ViewSidebar, "Hide sessions", tint = scheme.onSurfaceVariant, onClick = onHideSidebar)
             }
         }
         val servers = connections.values.toList()
+        val activity = if (settings.activityMode) activityData(servers, query) else null
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 8.dp)) {
-            if (settings.activityMode) {
-                item(key = "activity") { ActivityList(servers, query, app, onOpened) }
+            if (activity != null) {
+                // Rows keep their identity across groups, so they glide when their status changes.
+                Priority.entries.forEach { priority ->
+                    val group = activity.rows.filter { it.priority == priority }
+                    if (group.isNotEmpty()) {
+                        item(key = "group-${priority.name}") {
+                            Text(
+                                priority.title,
+                                Modifier.animateItem().padding(start = 18.dp, top = 12.dp, bottom = 4.dp),
+                                style = MaterialTheme.typography.labelLarge,
+                                color = scheme.onSurfaceVariant,
+                            )
+                        }
+                        items(group, key = { "pane-${it.block.id}" }) { row ->
+                            WindowRow(
+                                title = activity.titles[row.block.id] ?: row.window.displayTitle(activity.titles),
+                                subtitle = row.status?.message ?: row.session.label,
+                                selected = false,
+                                modifier = Modifier.animateItem(),
+                                tile = {
+                                    Box(contentAlignment = Alignment.TopEnd) {
+                                        ProgramTile(ProgramNames.candidates(row.status?.app, activity.programs[row.block.id]))
+                                        StatusDot(listOf(row.block.id), activity.statuses, activity.attention)
+                                    }
+                                },
+                                onClick = {
+                                    app.select(Selection(row.connection.config.id, row.session.id))
+                                    row.connection.focusBlock(row.session.id, row.block.id)
+                                    onOpened()
+                                },
+                            )
+                        }
+                    }
+                }
             } else {
                 servers.forEach { connection ->
                     item(key = connection.config.id) {
-                        ServerSection(connection, selection, query, settings.collapsedSessions, app, onOpened, onMessage)
+                        Box(Modifier.animateItem()) {
+                            ServerSection(connection, selection, query, settings.collapsedSessions, app, onOpened, onMessage)
+                        }
                     }
                 }
             }
             item(key = "add-server") {
                 Row(
                     Modifier
+                        .animateItem()
                         .padding(horizontal = 8.dp, vertical = 10.dp)
                         .clip(RoundedCornerShape(12.dp))
                         .clickable(onClick = onAddServer)
@@ -189,7 +236,6 @@ private fun ToolPill(
     val scheme = MaterialTheme.colorScheme
     Row(
         modifier
-            .animateContentSize()
             .clip(CircleShape)
             .background(scheme.surfaceContainerHigh),
         verticalAlignment = Alignment.CenterVertically,
@@ -217,6 +263,7 @@ private fun ToolPill(
         } else {
             RoundButton(Icons.Rounded.Search, "Search", filled = false, tint = scheme.onSurfaceVariant, onClick = onStartSearch)
         }
+        if (!searching) Spacer(Modifier.weight(1f))
         RoundButton(Icons.Rounded.Settings, "Settings", filled = false, tint = scheme.onSurfaceVariant, onClick = onOpenSettings)
     }
 }
@@ -439,32 +486,42 @@ private fun SessionGroup(
             connection.newWindow(session.id, onMessage)
         }
         RoundButton(
-            if (collapsed) Icons.Rounded.ExpandMore else Icons.Rounded.ExpandLess,
+            Icons.Rounded.ExpandLess,
             if (collapsed) "Expand" else "Collapse",
             size = 30.dp, filled = false, tint = muted,
+            iconRotation = if (collapsed) 180f else 0f,
         ) {
             app.updateSettings {
                 it.copy(collapsedSessions = if (collapsed) it.collapsedSessions - session.id else it.collapsedSessions + session.id)
             }
         }
     }
-    if (collapsed) return
-    view?.windows?.forEach { window ->
-        val title = window.displayTitle(titles)
-        if (query.isNotBlank() && !title.contains(query, true) && !session.label.contains(query, true)) return@forEach
-        val selected = selection?.serverId == connection.config.id && selection.sessionId == session.id && view.activeWindow?.id == window.id
-        WindowRow(
-            title = title,
-            subtitle = window.blocks.firstNotNullOfOrNull { statuses[it.id]?.takeIf { s -> s.isBlocked }?.message },
-            selected = selected,
-            tile = { WindowTile(window, statuses, programs, attention) },
-            onClick = {
-                app.select(Selection(connection.config.id, session.id))
-                connection.focusWindow(session.id, window.id)
-                app.recordRecent(connection.config.id, session.id, title)
-                onOpened()
-            },
-        )
+    AnimatedVisibility(
+        !collapsed,
+        enter = expandVertically(motion()) + fadeIn(motion(MOTION_SHORT)),
+        exit = shrinkVertically(motion()) + fadeOut(motion(MOTION_SHORT)),
+    ) {
+        Column(Modifier.animateContentSize(motion())) {
+            view?.windows?.forEach { window ->
+                val title = window.displayTitle(titles)
+                if (query.isNotBlank() && !title.contains(query, true) && !session.label.contains(query, true)) return@forEach
+                val selected = selection?.serverId == connection.config.id && selection.sessionId == session.id && view.activeWindow?.id == window.id
+                key(window.id) {
+                    WindowRow(
+                        title = title,
+                        subtitle = window.blocks.firstNotNullOfOrNull { statuses[it.id]?.takeIf { s -> s.isBlocked }?.message },
+                        selected = selected,
+                        tile = { WindowTile(window, statuses, programs, attention) },
+                        onClick = {
+                            app.select(Selection(connection.config.id, session.id))
+                            connection.focusWindow(session.id, window.id)
+                            app.recordRecent(connection.config.id, session.id, title)
+                            onOpened()
+                        },
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -473,16 +530,22 @@ private fun WindowRow(
     title: String,
     subtitle: String?,
     selected: Boolean,
+    modifier: Modifier = Modifier,
     tile: @Composable () -> Unit,
     onClick: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
+    val background by animateColorAsState(
+        if (selected) scheme.surfaceContainerHigh else scheme.background.copy(alpha = 0f),
+        motion(),
+        label = "row",
+    )
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
             .padding(horizontal = 8.dp, vertical = 1.dp)
             .clip(RoundedCornerShape(16.dp))
-            .background(if (selected) scheme.surfaceContainerHigh else Color.Transparent)
+            .background(background)
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -490,44 +553,58 @@ private fun WindowRow(
         tile()
         Column(Modifier.padding(start = 12.dp).weight(1f)) {
             Text(title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (subtitle != null) {
-                Text(subtitle, style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            AnimatedVisibility(
+                subtitle != null,
+                enter = expandVertically(motion()) + fadeIn(motion(MOTION_SHORT)),
+                exit = shrinkVertically(motion()) + fadeOut(motion(MOTION_SHORT)),
+            ) {
+                Text(subtitle.orEmpty(), style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
     }
 }
 
-/** Panes from every server grouped by how much they need attention. */
+private class ActivityData(
+    val rows: List<PaneRow>,
+    val statuses: Map<String, ProgramStatus>,
+    val attention: Set<String>,
+    val titles: Map<String, String>,
+    val programs: Map<String, String>,
+)
+
+/** Gathers panes from every server, each with how much it needs attention. */
 @Composable
-private fun ActivityList(servers: List<ServerConnection>, query: String, app: AppState, onOpened: () -> Unit) {
+private fun activityData(servers: List<ServerConnection>, query: String): ActivityData {
     val rows = mutableListOf<PaneRow>()
     val attentionAll = mutableSetOf<String>()
     val statusAll = mutableMapOf<String, ProgramStatus>()
     val titlesAll = mutableMapOf<String, String>()
     val programsAll = mutableMapOf<String, String>()
     for (connection in servers) {
-        val sessions by connection.sessions.collectAsState()
-        val views by connection.views.collectAsState()
-        val statuses by connection.statuses.collectAsState()
-        val attention by connection.attention.collectAsState()
-        val titles by connection.titles.collectAsState()
-        val programs by connection.programs.collectAsState()
-        titlesAll += titles
-        attentionAll += attention
-        statusAll += statuses
-        programsAll += programs
-        for (session in sessions) {
-            val view = views[session.id] ?: continue
-            for (window in view.windows) for (block in window.blocks) {
-                val status = statuses[block.id]
-                val priority = when {
-                    status?.isBlocked == true -> Priority.Blocked
-                    status?.isError == true -> Priority.Error
-                    status?.isWorking == true -> Priority.Working
-                    status?.isDone == true || block.id in attention -> Priority.Done
-                    else -> Priority.Quiet
+        key(connection.config.id) {
+            val sessions by connection.sessions.collectAsState()
+            val views by connection.views.collectAsState()
+            val statuses by connection.statuses.collectAsState()
+            val attention by connection.attention.collectAsState()
+            val titles by connection.titles.collectAsState()
+            val programs by connection.programs.collectAsState()
+            titlesAll += titles
+            attentionAll += attention
+            statusAll += statuses
+            programsAll += programs
+            for (session in sessions) {
+                val view = views[session.id] ?: continue
+                for (window in view.windows) for (block in window.blocks) {
+                    val status = statuses[block.id]
+                    val priority = when {
+                        status?.isBlocked == true -> Priority.Blocked
+                        status?.isError == true -> Priority.Error
+                        status?.isWorking == true -> Priority.Working
+                        status?.isDone == true || block.id in attention -> Priority.Done
+                        else -> Priority.Quiet
+                    }
+                    rows += PaneRow(connection, session, window, block, status, priority)
                 }
-                rows += PaneRow(connection, session, window, block, status, priority)
             }
         }
     }
@@ -535,34 +612,5 @@ private fun ActivityList(servers: List<ServerConnection>, query: String, app: Ap
         query.isBlank() || it.window.displayTitle(titlesAll).contains(query, true) || it.session.label.contains(query, true) ||
             it.status?.message?.contains(query, true) == true
     }
-    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-        Priority.entries.forEach { priority ->
-            val group = filtered.filter { it.priority == priority }
-            if (group.isEmpty()) return@forEach
-            Text(
-                priority.title,
-                Modifier.padding(start = 18.dp, top = 12.dp, bottom = 4.dp),
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            group.forEach { row ->
-                WindowRow(
-                    title = titlesAll[row.block.id] ?: row.window.displayTitle(titlesAll),
-                    subtitle = row.status?.message ?: row.session.label,
-                    selected = false,
-                    tile = {
-                        Box(contentAlignment = Alignment.TopEnd) {
-                            ProgramTile(ProgramNames.candidates(row.status?.app, programsAll[row.block.id]))
-                            StatusDot(listOf(row.block.id), statusAll, attentionAll)
-                        }
-                    },
-                    onClick = {
-                        app.select(Selection(row.connection.config.id, row.session.id))
-                        row.connection.focusBlock(row.session.id, row.block.id)
-                        onOpened()
-                    },
-                )
-            }
-        }
-    }
+    return ActivityData(filtered, statusAll, attentionAll, titlesAll, programsAll)
 }

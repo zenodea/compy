@@ -1,5 +1,8 @@
 package dev.compy.ui
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -32,11 +35,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -119,11 +125,16 @@ private fun RoundKey(controller: WorkspaceController, def: KeyDef) {
     val bit = stickyBit(def)
     val active = controller.stickyMods and bit != 0
     val scheme = MaterialTheme.colorScheme
+    val background by animateColorAsState(
+        if (active) scheme.primary else scheme.surfaceContainerHigh,
+        motion(MOTION_SHORT),
+        label = "command",
+    )
     RoundButton(
         iconFor(def.icon)!!, def.label,
         tint = if (active) scheme.onPrimary else scheme.onSurface,
-        modifier = if (active) Modifier.clip(CircleShape).background(scheme.primary) else Modifier,
-        filled = !active,
+        modifier = Modifier.clip(CircleShape).background(background),
+        filled = false,
     ) { controller.toggleSticky(bit) }
 }
 
@@ -136,22 +147,34 @@ private fun RowScope.KeyButton(controller: WorkspaceController, def: KeyDef, onO
     val locked = bit != 0 && controller.isLocked(bit)
     val scheme = MaterialTheme.colorScheme
     val repeats = def.kind == "key" && def.mods.isEmpty() && def.icon != null
+    var pressed by remember { mutableStateOf(false) }
+    val background by animateColorAsState(
+        when {
+            locked -> scheme.primary
+            active -> scheme.primaryContainer
+            pressed -> scheme.surfaceContainerHighest
+            else -> scheme.background.copy(alpha = 0f)
+        },
+        // Presses light up at once and fade out gently, so fast typing still shows each key.
+        if (pressed) snap() else motion(MOTION_SHORT),
+        label = "key",
+    )
+    val scale by animateFloatAsState(if (pressed) 0.92f else 1f, motion(MOTION_SHORT), label = "key-scale")
     Box(
         Modifier
             .weight(1f)
             .height(38.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
             .clip(RoundedCornerShape(12.dp))
-            .background(
-                when {
-                    locked -> scheme.primary
-                    active -> scheme.primaryContainer
-                    else -> Color.Transparent
-                },
-            )
+            .background(background)
             .semantics { contentDescription = def.label }
             .pointerInput(def) {
                 detectTapGestures(
                     onPress = {
+                        pressed = true
                         haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         when {
                             def.kind == "sticky" -> if (tryAwaitRelease()) controller.toggleSticky(bit)
@@ -170,16 +193,21 @@ private fun RowScope.KeyButton(controller: WorkspaceController, def: KeyDef, onO
                             }
                             else -> if (tryAwaitRelease()) controller.press(def)
                         }
+                        pressed = false
                     },
                 )
             },
         contentAlignment = Alignment.Center,
     ) {
-        val tint = when {
-            locked -> scheme.onPrimary
-            active -> scheme.onPrimaryContainer
-            else -> scheme.onSurface
-        }
+        val tint by animateColorAsState(
+            when {
+                locked -> scheme.onPrimary
+                active -> scheme.onPrimaryContainer
+                else -> scheme.onSurface
+            },
+            motion(MOTION_SHORT),
+            label = "key-tint",
+        )
         val icon = iconFor(def.icon)
         if (icon != null) {
             Icon(icon, null, Modifier.size(18.dp), tint = tint)

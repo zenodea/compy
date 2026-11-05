@@ -7,7 +7,25 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -22,7 +40,12 @@ import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.ViewSidebar
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.zIndex
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -107,6 +130,10 @@ fun Workspace(
     val window = view?.activeWindow
 
     var overview by rememberSaveable(sessionId) { mutableStateOf(false) }
+    // 0 shows the window and 1 the overview, with the window shrinking into its card between them.
+    val overviewProgress = remember { Animatable(if (overview) 1f else 0f) }
+    var areaBounds by remember { mutableStateOf<Rect?>(null) }
+    var cardBounds by remember { mutableStateOf<Rect?>(null) }
     var arranging by rememberSaveable(sessionId) { mutableStateOf(false) }
     var composer by rememberSaveable(sessionId) { mutableStateOf(false) }
 
@@ -125,18 +152,44 @@ fun Workspace(
     }
     val arrangeInset by animateDpAsState(if (arranging) 28.dp else 0.dp, label = "arrange")
 
+    LaunchedEffect(overview) {
+        if (overview) controller.focusedView()?.hideKeyboard()
+        overviewProgress.animateTo(if (overview) 1f else 0f, motion(MOTION_LONG))
+    }
+    val p = overviewProgress.value
+    val chromeAlpha = 1f - p
+
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        if (p > 0f && view != null) {
+            WindowOverview(
+                controller, view, progress = p,
+                onClose = { overview = false },
+                onMessage = onMessage,
+                onActiveCard = { cardBounds = it },
+                // Once settled, the overview is on top and takes all touches.
+                modifier = Modifier.zIndex(if (p >= 1f) 2f else 0f),
+            )
+        }
         Column(
             Modifier
                 .fillMaxSize()
+                .zIndex(1f)
                 .statusBarsPadding()
                 .imePadding()
                 .then(if (imeVisible) Modifier else Modifier.navigationBarsPadding()),
         ) {
             if (compact) {
-                CompactTopBar(controller, view, window, onShowSidebar, onOverview = { overview = true }, onArrange = { arranging = true }, onMessage = onMessage)
+                Box(Modifier.graphicsLayer { alpha = chromeAlpha }) {
+                    CompactTopBar(controller, view, window, onShowSidebar, onOverview = { overview = true }, onArrange = { arranging = true }, onMessage = onMessage)
+                }
             }
-            (state as? ConnectionState.Offline)?.let { Notice("Offline: ${it.reason}. Trying again…") }
+            var lastOffline by remember { mutableStateOf("") }
+            (state as? ConnectionState.Offline)?.let { lastOffline = it.reason }
+            AnimatedVisibility(
+                state is ConnectionState.Offline,
+                enter = expandVertically(motion()) + fadeIn(motion(MOTION_SHORT)),
+                exit = shrinkVertically(motion()) + fadeOut(motion(MOTION_SHORT)),
+            ) { Notice("Offline: $lastOffline. Trying again…") }
             warning?.let { Notice(it) }
             Row(Modifier.weight(1f).fillMaxWidth()) {
                 Column(Modifier.weight(1f)) {
@@ -145,7 +198,23 @@ fun Workspace(
                             .weight(1f)
                             .fillMaxWidth()
                             .padding(horizontal = 6.dp, vertical = 2.dp)
-                            .padding(horizontal = arrangeInset, vertical = arrangeInset),
+                            .padding(horizontal = arrangeInset, vertical = arrangeInset)
+                            .onGloballyPositioned { areaBounds = it.boundsInRoot() }
+                            .graphicsLayer {
+                                val area = areaBounds
+                                val card = cardBounds
+                                if (p > 0f && area != null && card != null && area.width > 0f) {
+                                    // Fit the window inside its card, keeping its proportions.
+                                    val scale = minOf(card.width / area.width, card.height / area.height)
+                                    val zoom = 1f + (scale - 1f) * p
+                                    scaleX = zoom
+                                    scaleY = zoom
+                                    translationX = (card.center.x - area.center.x) * p
+                                    translationY = (card.center.y - area.center.y) * p
+                                    // The live thumbnail takes over for the last part of the move.
+                                    alpha = if (p > 0.85f) (1f - p) / 0.15f else 1f
+                                }
+                            },
                     ) {
                         if (window == null) {
                             Text(
@@ -154,9 +223,25 @@ fun Workspace(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         } else {
-                            androidx.compose.runtime.key(window.id) {
+                            val order = view.windows.map { it.id }
+                            AnimatedContent(
+                                window.id,
+                                Modifier.fillMaxSize(),
+                                transitionSpec = {
+                                    if (overviewProgress.value > 0f) {
+                                        EnterTransition.None togetherWith ExitTransition.None
+                                    } else {
+                                        // Tabs slide in the direction they sit in the tab strip.
+                                        val direction = if (order.indexOf(targetState) >= order.indexOf(initialState)) 1 else -1
+                                        (slideInHorizontally(motion()) { direction * it / 6 } + fadeIn(motion(MOTION_SHORT))) togetherWith
+                                            (slideOutHorizontally(motion()) { -direction * it / 6 } + fadeOut(motion(MOTION_SHORT)))
+                                    }
+                                },
+                                label = "window",
+                            ) { id ->
+                                val shownWindow = view.windows.firstOrNull { it.id == id } ?: return@AnimatedContent
                                 PaneArea(
-                                    controller, window, Modifier.fillMaxSize(),
+                                    controller, shownWindow, Modifier.fillMaxSize(),
                                     onPaneTapped = { block ->
                                         if (block != controller.focusedBlockId) {
                                             controller.focusedBlockId = block
@@ -167,6 +252,7 @@ fun Workspace(
                                         connection.clearAttention(block)
                                     },
                                     arranging = arranging,
+                                    enabled = p == 0f && id == window.id,
                                     onDrop = { dragged, target, zone ->
                                         when (zone) {
                                             DropZone.Swap -> connection.swapBlocks(sessionId, dragged, target, onMessage)
@@ -180,42 +266,55 @@ fun Workspace(
                             }
                         }
                     }
-                    if (arranging) {
-                        Column(
-                            Modifier.fillMaxWidth().padding(16.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            Text(
-                                window?.displayTitle(titles).orEmpty(),
-                                style = MaterialTheme.typography.titleSmall,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(
-                                "Drag a pane onto another's edge to split, or its center to swap",
-                                Modifier.padding(top = 2.dp, bottom = 10.dp),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Button(onClick = { arranging = false }) { Text("Done") }
+                    AnimatedContent(
+                        arranging,
+                        Modifier.graphicsLayer { alpha = chromeAlpha },
+                        transitionSpec = {
+                            (fadeIn(motion(MOTION_SHORT)) togetherWith fadeOut(motion(MOTION_SHORT))) using SizeTransform(clip = false)
+                        },
+                        label = "bottom",
+                    ) { arrange ->
+                        if (arrange) {
+                            Column(
+                                Modifier.fillMaxWidth().padding(16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                Text(
+                                    window?.displayTitle(titles).orEmpty(),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    "Drag a pane onto another's edge to split, or its center to swap",
+                                    Modifier.padding(top = 2.dp, bottom = 10.dp),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Button(onClick = { arranging = false }) { Text("Done") }
+                            }
+                        } else if (view != null) {
+                            Column {
+                                WindowPills(controller, view, onMessage, onOpenComposer = { composer = true })
+                                KeyBar(
+                                    controller,
+                                    keyboardVisible = imeVisible,
+                                    onToggleKeyboard = ::toggleKeyboard,
+                                    onOpenComposer = { composer = true },
+                                )
+                            }
                         }
-                    } else if (view != null) {
-                        WindowPills(controller, view, onMessage, onOpenComposer = { composer = true })
-                        KeyBar(
-                            controller,
-                            keyboardVisible = imeVisible,
-                            onToggleKeyboard = ::toggleKeyboard,
-                            onOpenComposer = { composer = true },
-                        )
                     }
                 }
-                if (!compact && !arranging) {
+                AnimatedVisibility(
+                    !compact && !arranging,
+                    Modifier.graphicsLayer { alpha = chromeAlpha },
+                    enter = expandHorizontally(motion()) + fadeIn(motion(MOTION_SHORT)),
+                    exit = shrinkHorizontally(motion()) + fadeOut(motion(MOTION_SHORT)),
+                ) {
                     SideRail(controller, view, window, sidebarHidden, onOverview = { overview = true }, onArrange = { arranging = true }, onShowSidebar = onShowSidebar, onMessage = onMessage)
                 }
             }
-        }
-        if (overview && view != null) {
-            WindowOverview(controller, view, onClose = { overview = false }, onMessage = onMessage)
         }
     }
 
@@ -449,14 +548,19 @@ private fun WindowPills(controller: WorkspaceController, view: SessionView, onMe
     val scheme = MaterialTheme.colorScheme
     var menuFor by remember { mutableStateOf<String?>(null) }
     var renaming by remember { mutableStateOf<WindowView?>(null) }
+    val tabs = rememberLazyListState()
+    val activeIndex = view.windows.indexOfFirst { it.id == view.activeWindow?.id }
+    LaunchedEffect(activeIndex) { if (activeIndex >= 0) tabs.animateScrollToItem(activeIndex) }
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 10.dp).padding(top = 6.dp, bottom = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         LazyRow(
-            Modifier
+            state = tabs,
+            modifier = Modifier
                 .weight(1f, fill = false)
+                .animateContentSize(motion())
                 .clip(CircleShape)
                 .background(scheme.surfaceContainerHigh)
                 .padding(3.dp),
@@ -465,11 +569,16 @@ private fun WindowPills(controller: WorkspaceController, view: SessionView, onMe
         ) {
             items(view.windows, key = { it.id }) { window ->
                 val active = window.id == view.activeWindow?.id
-                Box {
+                val tabColor by animateColorAsState(
+                    if (active) scheme.surfaceContainerHighest else scheme.surfaceContainerHigh,
+                    motion(),
+                    label = "tab",
+                )
+                Box(Modifier.animateItem()) {
                     Row(
                         Modifier
                             .clip(CircleShape)
-                            .background(if (active) scheme.surfaceContainerHighest else Color.Transparent)
+                            .background(tabColor)
                             .combinedClickable(
                                 onClick = { connection.focusWindow(controller.sessionId, window.id) },
                                 onLongClick = { menuFor = window.id },
@@ -478,7 +587,11 @@ private fun WindowPills(controller: WorkspaceController, view: SessionView, onMe
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         WindowTile(window, statuses, programs, attention, size = 22.dp)
-                        if (active) {
+                        AnimatedVisibility(
+                            active,
+                            enter = expandHorizontally(motion()) + fadeIn(motion(MOTION_SHORT)),
+                            exit = shrinkHorizontally(motion()) + fadeOut(motion(MOTION_SHORT)),
+                        ) {
                             Text(
                                 window.displayTitle(titles),
                                 style = MaterialTheme.typography.labelMedium,
@@ -550,7 +663,15 @@ private fun ComposerSheet(controller: WorkspaceController, sendsEnter: Boolean, 
 /** Every window in a session as a live thumbnail on the bare canvas. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun WindowOverview(controller: WorkspaceController, view: SessionView, onClose: () -> Unit, onMessage: (String) -> Unit) {
+private fun WindowOverview(
+    controller: WorkspaceController,
+    view: SessionView,
+    progress: Float,
+    onClose: () -> Unit,
+    onMessage: (String) -> Unit,
+    onActiveCard: (Rect) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val connection = controller.connection
     val titles by connection.titles.collectAsStateWithLifecycle()
     val statuses by connection.statuses.collectAsStateWithLifecycle()
@@ -558,9 +679,15 @@ private fun WindowOverview(controller: WorkspaceController, view: SessionView, o
     val attention by connection.attention.collectAsStateWithLifecycle()
     val scheme = MaterialTheme.colorScheme
     androidx.activity.compose.BackHandler(onBack = onClose)
-    Box(Modifier.fillMaxSize().background(scheme.background)) {
+    Box(
+        modifier
+            .fillMaxSize()
+            .background(scheme.background)
+            // Keep touches away from the terminal underneath.
+            .pointerInput(Unit) { detectTapGestures { } },
+    ) {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.graphicsLayer { alpha = progress }, verticalAlignment = Alignment.CenterVertically) {
                 Text(view.label, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 RoundButton(Icons.Rounded.Add, "New window", onClick = { connection.newWindow(controller.sessionId, onMessage) })
                 Spacer(Modifier.width(8.dp))
@@ -573,14 +700,33 @@ private fun WindowOverview(controller: WorkspaceController, view: SessionView, o
                 modifier = Modifier.padding(top = 16.dp),
             ) {
                 items(view.windows, key = { it.id }) { window ->
+                    val active = window.id == view.activeWindow?.id
                     Column(
-                        Modifier.clickable {
-                            connection.focusWindow(controller.sessionId, window.id)
-                            onClose()
-                        },
+                        Modifier
+                            .animateItem()
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable {
+                                connection.focusWindow(controller.sessionId, window.id)
+                                onClose()
+                            },
                     ) {
-                        WindowThumbnail(controller, window, Modifier.fillMaxWidth().aspectRatio(1.35f))
-                        Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        WindowThumbnail(
+                            controller, window,
+                            Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(1.35f)
+                                .then(if (active) Modifier.onGloballyPositioned { onActiveCard(it.boundsInRoot()) } else Modifier)
+                                .graphicsLayer {
+                                    // The real window flies into the active card; others fade in around it.
+                                    alpha = if (active) ((progress - 0.85f) / 0.15f).coerceIn(0f, 1f) else progress
+                                    if (!active) {
+                                        val scale = 0.94f + 0.06f * progress
+                                        scaleX = scale
+                                        scaleY = scale
+                                    }
+                                },
+                        )
+                        Row(Modifier.padding(top = 8.dp).graphicsLayer { alpha = progress }, verticalAlignment = Alignment.CenterVertically) {
                             WindowTile(window, statuses, programs, attention, size = 22.dp)
                             Text(
                                 window.displayTitle(titles),
