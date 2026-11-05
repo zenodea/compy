@@ -1,5 +1,13 @@
 # Releasing
 
+## Share a test build
+
+The QA build is shrunk like a release and signed with the local debug key. Leave out local Rex icons when it will be uploaded anywhere:
+
+```sh
+./gradlew :app:assembleQa -PnoLocalIcons
+```
+
 ## Sign a release APK
 
 1. Create a keystore once, and keep it and its passwords backed up. Updates must be signed with the same key.

@@ -91,7 +91,7 @@ android {
 }
 
 // Icons rendered from a local copy of Rex (scripts/import-rex-icons.sh). Never in release builds.
-if (rootProject.file("local-icons").exists()) {
+if (rootProject.file("local-icons").exists() && !project.hasProperty("noLocalIcons")) {
     android.sourceSets.getByName("debug").assets.srcDir(rootProject.file("local-icons"))
     android.sourceSets.getByName("qa").assets.srcDir(rootProject.file("local-icons"))
 }
