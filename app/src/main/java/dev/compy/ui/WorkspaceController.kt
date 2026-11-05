@@ -1,0 +1,236 @@
+package dev.compy.ui
+
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.core.net.toUri
+import dev.compy.AppState
+import dev.compy.data.KeyDef
+import dev.compy.data.SizeMode
+import dev.compy.rex.RexKey
+import dev.compy.rex.ServerConnection
+import dev.compy.term.TerminalView
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+
+/** Ties one on-screen session to its server: input routing, pane sizes and shared key state. */
+class WorkspaceController(
+    val app: AppState,
+    val connection: ServerConnection,
+    val sessionId: String,
+    private val context: Context,
+) {
+    private data class Grid(val cols: Int, val rows: Int, val cellW: Int, val cellH: Int)
+
+    private val views = HashMap<String, TerminalView>()
+    private val grids = HashMap<String, Grid>()
+    private val sizeJobs = HashMap<String, Job>()
+    private val visibleBlocks = HashSet<String>()
+
+    var focusedBlockId by mutableStateOf<String?>(null)
+
+    /** Modifiers latched on the key bar, as RexKey bit flags. */
+    var stickyMods by mutableIntStateOf(0)
+        private set
+    private var lockedMods = 0
+
+    val sizeMode: SizeMode get() = app.settings.value.sizeModes[sessionId] ?: SizeMode.TakeOver
+
+    fun register(blockId: String, view: TerminalView) {
+        views[blockId] = view
+        visibleBlocks += blockId
+    }
+
+    fun unregister(blockId: String) {
+        views.remove(blockId)
+        visibleBlocks -= blockId
+        grids.remove(blockId)
+        sizeJobs.remove(blockId)?.cancel()
+    }
+
+    fun focusedView(): TerminalView? = focusedBlockId?.let { views[it] } ?: views.values.firstOrNull()
+
+    fun toggleSticky(mod: Int) {
+        stickyMods = when {
+            lockedMods and mod != 0 -> {
+                lockedMods = lockedMods and mod.inv()
+                stickyMods and mod.inv()
+            }
+            stickyMods and mod != 0 -> {
+                // A second tap keeps the modifier on until it's tapped again.
+                lockedMods = lockedMods or mod
+                stickyMods
+            }
+            else -> stickyMods or mod
+        }
+    }
+
+    fun isLocked(mod: Int) = lockedMods and mod != 0
+
+    fun consumeSticky(): Int {
+        val mods = stickyMods
+        stickyMods = lockedMods
+        return mods
+    }
+
+    private fun target(): String? = focusedBlockId ?: views.keys.firstOrNull()
+
+    fun sendKey(key: RexKey, blockId: String? = target()) {
+        connection.sendKey(sessionId, blockId ?: return, key)
+    }
+
+    /** Sends typed text. Long text and multi-line text go as a paste, so it arrives in one piece. */
+    fun sendText(text: String, blockId: String? = target()) {
+        val block = blockId ?: return
+        connection.clearAttention(block)
+        if (text.length > MAX_TYPED || (text.contains('\n') && text != "\n")) {
+            connection.paste(sessionId, block, text)
+            return
+        }
+        var i = 0
+        while (i < text.length) {
+            val cp = text.codePointAt(i)
+            i += Character.charCount(cp)
+            val sticky = consumeSticky()
+            val key = when (cp) {
+                '\n'.code, '\r'.code -> if (sticky == 0) RexKey.ENTER else RexKey("enter", RexKey.modsString(sticky))
+                '\t'.code -> if (sticky == 0) RexKey.TAB else RexKey("tab", RexKey.modsString(sticky))
+                else -> RexKey.forChar(cp, sticky)
+            }
+            connection.sendKey(sessionId, block, key)
+        }
+    }
+
+    fun paste(text: String, blockId: String? = target()) {
+        connection.paste(sessionId, blockId ?: return, text)
+    }
+
+    fun clipboardText(): String? {
+        val clip = context.getSystemService(ClipboardManager::class.java).primaryClip ?: return null
+        if (clip.itemCount == 0) return null
+        return clip.getItemAt(0).coerceToText(context)?.toString()
+    }
+
+    fun copy(text: String) {
+        context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Terminal", text))
+    }
+
+    fun press(def: KeyDef) {
+        when (def.kind) {
+            "text" -> sendText(def.text)
+            "key" -> {
+                val sticky = consumeSticky()
+                val mods = buildList {
+                    if (def.mods.isNotEmpty()) add(def.mods)
+                    if (sticky != 0) add(RexKey.modsString(sticky))
+                }.joinToString("+")
+                val letter = def.key.removePrefix("key_").takeIf { def.key.startsWith("key_") }
+                sendKey(RexKey(def.key, mods, unshifted = letter?.firstOrNull()?.code ?: 0))
+                views[target()]?.let { /* typing returns the view to the bottom of its output */ }
+            }
+            "paste" -> clipboardText()?.let { paste(it) }
+        }
+    }
+
+    fun host(blockId: String, onTap: () -> Unit) = object : TerminalView.Host {
+        override fun sendKey(key: RexKey) = connection.sendKey(sessionId, blockId, key)
+        override fun sendText(text: String) = this@WorkspaceController.sendText(text, blockId)
+        override fun paste(text: String) = connection.paste(sessionId, blockId, text)
+
+        override fun sendMouse(action: String, button: String?, col: Int, row: Int) {
+            connection.sendMouse(sessionId, blockId, mousePayload(action, button, col, row))
+        }
+
+        override fun sendWheel(lines: Float, col: Int, row: Int) {
+            connection.sendWheel(sessionId, blockId, wheelPayload(lines, col, row))
+        }
+
+        override fun consumeStickyMods() = consumeSticky()
+        override fun onTapped() = onTap()
+
+        override fun onGridMeasured(cols: Int, rows: Int, cellW: Int, cellH: Int) {
+            grids[blockId] = Grid(cols, rows, cellW, cellH)
+            applySize(blockId)
+        }
+
+        override fun onFontSizeChanged(sizeSp: Float) {
+            app.updateSettings { it.copy(fontSizeSp = sizeSp) }
+        }
+
+        override fun copyText(text: String) = copy(text)
+        override fun clipboardText() = this@WorkspaceController.clipboardText()
+
+        override fun openUrl(url: String) {
+            runCatching {
+                context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+        }
+    }
+
+    private fun applySize(blockId: String) {
+        if (sizeMode != SizeMode.TakeOver || !app.foreground.value) return
+        val grid = grids[blockId] ?: return
+        // Layout changes and pinching report many sizes in a row; only the last one matters.
+        sizeJobs[blockId]?.cancel()
+        sizeJobs[blockId] = app.scope.launch {
+            delay(SIZE_DEBOUNCE_MS)
+            connection.fitBlock(sessionId, blockId, grid.cols, grid.rows, grid.cellW, grid.cellH)
+        }
+    }
+
+    /** Re-applies sizes after returning to the foreground or changing the session's mode. */
+    fun reapplySizes() {
+        if (sizeMode == SizeMode.TakeOver) {
+            grids.keys.toList().forEach(::applySize)
+        } else {
+            connection.releaseOwnership(sessionId, grids.keys.toList())
+        }
+    }
+
+    fun setSizeMode(mode: SizeMode) {
+        app.updateSettings { it.copy(sizeModes = it.sizeModes + (sessionId to mode)) }
+        app.scope.launch {
+            delay(50)
+            reapplySizes()
+        }
+    }
+
+    companion object {
+        private const val MAX_TYPED = 64
+        private const val SIZE_DEBOUNCE_MS = 120L
+
+        fun mousePayload(action: String, button: String?, col: Int, row: Int): JsonObject = buildJsonObject {
+            put("action", action)
+            if (button != null) put("button", button)
+            if (action == "press" && button != null) {
+                put("buttons", buildJsonObject { put(button, true) })
+            } else {
+                put("buttons", JsonNull)
+            }
+            put("x", col)
+            put("y", row)
+            put("pixel", JsonNull)
+            put("mods", "")
+        }
+
+        fun wheelPayload(lines: Float, col: Int, row: Int): JsonObject = buildJsonObject {
+            put("delta_mode", "line")
+            put("delta_x", 0)
+            put("delta_y", lines.toDouble())
+            put("x", col)
+            put("y", row)
+            put("pixel", JsonNull)
+            put("mods", "")
+        }
+    }
+}

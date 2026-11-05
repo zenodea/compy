@@ -1,0 +1,509 @@
+package dev.compy.ui
+
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Laptop
+import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconToggleButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.compy.AppState
+import dev.compy.Selection
+import dev.compy.rex.BlockInfo
+import dev.compy.rex.ConnectionState
+import dev.compy.rex.ProgramStatus
+import dev.compy.rex.ServerConnection
+import dev.compy.rex.SessionSummary
+import dev.compy.rex.SessionView
+import dev.compy.rex.WindowView
+import kotlinx.coroutines.launch
+
+/** A small dot for the most urgent state among some blocks; nothing when all are quiet. */
+@Composable
+fun StatusDot(blockIds: List<String>, statuses: Map<String, ProgramStatus>, attention: Set<String>, modifier: Modifier = Modifier) {
+    val all = blockIds.mapNotNull { statuses[it] }
+    val scheme = MaterialTheme.colorScheme
+    when {
+        all.any { it.isBlocked } -> Dot(scheme.tertiary, modifier)
+        all.any { it.isError } -> Dot(scheme.error, modifier)
+        all.any { it.isWorking } -> {
+            val pulse by rememberInfiniteTransition(label = "working").animateFloat(
+                0.3f, 1f, infiniteRepeatable(tween(800), RepeatMode.Reverse), label = "working",
+            )
+            Dot(scheme.primary, modifier.alpha(pulse))
+        }
+        blockIds.any { it in attention } -> Dot(scheme.primary, modifier)
+    }
+}
+
+@Composable
+private fun Dot(color: Color, modifier: Modifier = Modifier) {
+    Box(modifier.padding(end = 2.dp).size(8.dp).clip(CircleShape).background(color))
+}
+
+private enum class Priority(val title: String) {
+    Blocked("Needs you"), Error("Errors"), Working("Working"), Done("Finished"), Quiet("Quiet")
+}
+
+private data class PaneRow(
+    val connection: ServerConnection,
+    val session: SessionSummary,
+    val window: WindowView,
+    val block: BlockInfo,
+    val status: ProgramStatus?,
+    val priority: Priority,
+)
+
+/** The list of servers, sessions and windows, or panes by priority when Activity is on. */
+@Composable
+fun Sidebar(
+    app: AppState,
+    modifier: Modifier = Modifier,
+    onOpenSettings: () -> Unit,
+    onAddServer: () -> Unit,
+    onOpened: () -> Unit,
+    onMessage: (String) -> Unit,
+) {
+    val settings by app.settings.collectAsStateWithLifecycle()
+    val connections by app.connections.collectAsStateWithLifecycle()
+    val selection by app.selection.collectAsStateWithLifecycle()
+    var query by rememberSaveable { mutableStateOf("") }
+
+    Column(
+        modifier
+            .fillMaxHeight()
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .statusBarsPadding()
+            .imePadding()
+            .navigationBarsPadding(),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Compy", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                Row {
+                    IconToggleButton(
+                        checked = settings.activityMode,
+                        onCheckedChange = { value -> app.updateSettings { it.copy(activityMode = value) } },
+                    ) {
+                        Icon(
+                            if (settings.activityMode) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                            "Activity",
+                        )
+                    }
+                    IconButton(onClick = onOpenSettings) { Icon(Icons.Filled.Settings, "Settings") }
+                }
+            }
+        }
+        val servers = connections.values.toList()
+        LazyColumn(Modifier.weight(1f), contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 8.dp)) {
+            if (settings.activityMode) {
+                item(key = "activity") {
+                    ActivityList(servers, selection, query, app, onOpened)
+                }
+            } else {
+                servers.forEach { connection ->
+                    item(key = connection.config.id) {
+                        ServerSection(connection, selection, query, settings.collapsedSessions, app, onOpened, onMessage)
+                    }
+                }
+            }
+            item(key = "add-server") {
+                TextButton(onClick = onAddServer, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+                    Icon(Icons.Filled.Add, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Add server")
+                }
+            }
+        }
+        TextField(
+            value = query,
+            onValueChange = { query = it },
+            placeholder = { Text("Search") },
+            leadingIcon = { Icon(Icons.Filled.Search, null) },
+            singleLine = true,
+            shape = CircleShape,
+            colors = TextFieldDefaults.colors(
+                focusedIndicatorColor = Color.Transparent,
+                unfocusedIndicatorColor = Color.Transparent,
+                focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            ),
+            modifier = Modifier.fillMaxWidth().padding(10.dp),
+        )
+    }
+}
+
+@Composable
+private fun ServerSection(
+    connection: ServerConnection,
+    selection: Selection?,
+    query: String,
+    collapsed: Set<String>,
+    app: AppState,
+    onOpened: () -> Unit,
+    onMessage: (String) -> Unit,
+) {
+    val state by connection.state.collectAsStateWithLifecycle()
+    val sessions by connection.sessions.collectAsStateWithLifecycle()
+    val views by connection.views.collectAsStateWithLifecycle()
+    val statuses by connection.statuses.collectAsStateWithLifecycle()
+    val attention by connection.attention.collectAsStateWithLifecycle()
+    var menu by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
+    var removing by remember { mutableStateOf(false) }
+    var creating by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    Column {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Filled.Laptop, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(Modifier.padding(start = 10.dp).weight(1f)) {
+                Text(connection.config.label, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                val detail = when (val s = state) {
+                    ConnectionState.Connected -> null
+                    ConnectionState.Connecting -> "Connecting…"
+                    is ConnectionState.Offline -> s.reason
+                }
+                if (detail != null) {
+                    Text(detail, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
+                }
+            }
+            Box {
+                IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreHoriz, "Server options") }
+                DropdownMenu(menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(text = { Text("New session") }, onClick = {
+                        menu = false
+                        creating = true
+                    })
+                    DropdownMenuItem(text = { Text("Rename") }, onClick = {
+                        menu = false
+                        renaming = true
+                    })
+                    DropdownMenuItem(text = { Text("Connect again") }, onClick = {
+                        menu = false
+                        connection.retryNow()
+                    })
+                    DropdownMenuItem(text = { Text("Remove from Compy") }, onClick = {
+                        menu = false
+                        removing = true
+                    })
+                }
+            }
+        }
+        if (sessions.isEmpty() && state == ConnectionState.Connected) {
+            FilledTonalButton(onClick = { creating = true }, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Text("Start a session")
+            }
+        }
+        sessions.forEach { session ->
+            val view = views[session.id]
+            val matches = query.isBlank() || session.label.contains(query, ignoreCase = true) ||
+                view?.windows?.any { it.label.contains(query, ignoreCase = true) } == true
+            if (matches) {
+                SessionGroup(connection, session, view, selection, query, statuses, attention, session.id in collapsed, app, onOpened, onMessage)
+            }
+        }
+    }
+    if (renaming) {
+        RenameDialog("Rename server", connection.config.label, onDismiss = { renaming = false }) {
+            renaming = false
+            app.renameServer(connection.config.id, it)
+        }
+    }
+    if (creating) {
+        NewSessionDialog(onDismiss = { creating = false }) { label ->
+            creating = false
+            scope.launch {
+                try {
+                    val id = connection.createSession(label)
+                    if (id != null) {
+                        app.select(Selection(connection.config.id, id))
+                        onOpened()
+                    }
+                } catch (e: Exception) {
+                    onMessage(e.message ?: "Couldn't start a session")
+                }
+            }
+        }
+    }
+    if (removing) {
+        AlertDialog(
+            onDismissRequest = { removing = false },
+            title = { Text("Remove ${connection.config.label}?") },
+            text = { Text("Compy forgets this server. Its sessions keep running.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    removing = false
+                    app.removeServer(connection.config.id)
+                }) { Text("Remove") }
+            },
+            dismissButton = { TextButton(onClick = { removing = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+@Composable
+private fun NewSessionDialog(onDismiss: () -> Unit, onConfirm: (String?) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New session") },
+        text = {
+            OutlinedTextField(name, { name = it }, label = { Text("Name (optional)") }, singleLine = true)
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(name.ifBlank { null }) }) { Text("Start") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun SessionGroup(
+    connection: ServerConnection,
+    session: SessionSummary,
+    view: SessionView?,
+    selection: Selection?,
+    query: String,
+    statuses: Map<String, ProgramStatus>,
+    attention: Set<String>,
+    collapsed: Boolean,
+    app: AppState,
+    onOpened: () -> Unit,
+    onMessage: (String) -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            session.label,
+            Modifier.weight(1f),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        IconButton(onClick = { connection.newWindow(session.id, onMessage) }, Modifier.size(32.dp)) {
+            Icon(Icons.Filled.Add, "New window in ${session.label}", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        IconButton(
+            onClick = {
+                app.updateSettings {
+                    it.copy(collapsedSessions = if (collapsed) it.collapsedSessions - session.id else it.collapsedSessions + session.id)
+                }
+            },
+            Modifier.size(32.dp),
+        ) {
+            Icon(
+                if (collapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
+                if (collapsed) "Expand" else "Collapse",
+                Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    if (collapsed) return
+    view?.windows?.forEach { window ->
+        if (query.isNotBlank() && !window.label.contains(query, true) && !session.label.contains(query, true)) return@forEach
+        val selected = selection?.serverId == connection.config.id && selection.sessionId == session.id && view.activeWindow?.id == window.id
+        WindowRow(
+            title = window.label.ifEmpty { "Window" },
+            subtitle = null,
+            paneCount = window.blocks.size,
+            blockIds = window.blocks.map { it.id },
+            statuses = statuses,
+            attention = attention,
+            selected = selected,
+            onClick = {
+                app.select(Selection(connection.config.id, session.id))
+                connection.focusWindow(session.id, window.id)
+                onOpened()
+            },
+        )
+    }
+}
+
+@Composable
+private fun WindowRow(
+    title: String,
+    subtitle: String?,
+    paneCount: Int,
+    blockIds: List<String>,
+    statuses: Map<String, ProgramStatus>,
+    attention: Set<String>,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 1.dp)
+            .clip(RoundedCornerShape(24.dp))
+            .background(if (selected) scheme.secondaryContainer else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(contentAlignment = Alignment.TopEnd) {
+            Box(
+                Modifier.size(32.dp).clip(RoundedCornerShape(9.dp)).background(scheme.tertiaryContainer),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (paneCount > 1) {
+                    Text("$paneCount", style = MaterialTheme.typography.labelMedium, color = scheme.onTertiaryContainer)
+                } else {
+                    Icon(Icons.Filled.Terminal, null, Modifier.size(18.dp), tint = scheme.onTertiaryContainer)
+                }
+            }
+            StatusDot(blockIds, statuses, attention, Modifier.padding(start = 26.dp))
+        }
+        Column(Modifier.padding(start = 10.dp).weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (subtitle != null) {
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = scheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+/** Panes from every server grouped by how much they need attention. */
+@Composable
+private fun ActivityList(
+    servers: List<ServerConnection>,
+    selection: Selection?,
+    query: String,
+    app: AppState,
+    onOpened: () -> Unit,
+) {
+    val rows = mutableListOf<PaneRow>()
+    val attentionAll = mutableSetOf<String>()
+    val statusAll = mutableMapOf<String, ProgramStatus>()
+    for (connection in servers) {
+        val sessions by connection.sessions.collectAsState()
+        val views by connection.views.collectAsState()
+        val statuses by connection.statuses.collectAsState()
+        val attention by connection.attention.collectAsState()
+        attentionAll += attention
+        statusAll += statuses
+        for (session in sessions) {
+            val view = views[session.id] ?: continue
+            for (window in view.windows) for (block in window.blocks) {
+                val status = statuses[block.id]
+                val priority = when {
+                    status?.isBlocked == true -> Priority.Blocked
+                    status?.isError == true -> Priority.Error
+                    status?.isWorking == true -> Priority.Working
+                    status?.isDone == true || block.id in attention -> Priority.Done
+                    else -> Priority.Quiet
+                }
+                rows += PaneRow(connection, session, window, block, status, priority)
+            }
+        }
+    }
+    val filtered = rows.filter {
+        query.isBlank() || it.window.label.contains(query, true) || it.session.label.contains(query, true) ||
+            it.status?.message?.contains(query, true) == true
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Priority.entries.forEach { priority ->
+            val group = filtered.filter { it.priority == priority }
+            if (group.isEmpty()) return@forEach
+            Text(
+                priority.title,
+                Modifier.padding(start = 16.dp, top = 10.dp, bottom = 2.dp),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            group.forEach { row ->
+                WindowRow(
+                    title = row.window.label.ifEmpty { row.block.label.ifEmpty { "Pane" } },
+                    subtitle = row.status?.message ?: row.status?.app ?: row.session.label,
+                    paneCount = 1,
+                    blockIds = listOf(row.block.id),
+                    statuses = statusAll,
+                    attention = attentionAll,
+                    selected = false,
+                    onClick = {
+                        app.select(Selection(row.connection.config.id, row.session.id))
+                        row.connection.focusBlock(row.session.id, row.block.id)
+                        onOpened()
+                    },
+                )
+            }
+        }
+    }
+}

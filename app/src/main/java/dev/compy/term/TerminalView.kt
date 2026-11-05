@@ -114,7 +114,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     private var haveFrame = false
     private var chars = CharArray(512)
 
-    private var padding = 0f
+    /** Keeps text clear of the pane's rounded corners. */
+    private val padding = 6 * density
 
     // Selection, in viewport cells.
     private var selecting = false
