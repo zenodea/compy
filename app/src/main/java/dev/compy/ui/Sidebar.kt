@@ -40,6 +40,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.Laptop
+import androidx.compose.material.icons.rounded.LinkOff
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
@@ -87,6 +88,7 @@ import dev.compy.rex.ConnectionState
 import dev.compy.rex.HostEntry
 import dev.compy.rex.ProgramStatus
 import dev.compy.rex.ServerConnection
+import dev.compy.rex.asWindow
 import dev.compy.rex.SessionSummary
 import dev.compy.rex.SessionView
 import dev.compy.rex.WindowView
@@ -216,7 +218,7 @@ fun Sidebar(
                                 },
                                 onClick = {
                                     app.select(Selection(row.connection.config.id, row.session.id))
-                                    row.connection.focusBlock(row.session.id, row.block.id)
+                                    app.revealPane(row.connection, row.session.id, row.block.id)
                                     onOpened()
                                 },
                             )
@@ -609,6 +611,23 @@ private fun SessionGroup(
                     )
                 }
             }
+            val detached by connection.detached.collectAsStateWithLifecycle()
+            val loose = detached[session.id].orEmpty()
+            if (loose.isNotEmpty() && (query.isBlank() || session.label.contains(query, true))) {
+                WindowRow(
+                    title = if (loose.size == 1) "1 detached pane" else "${loose.size} detached panes",
+                    subtitle = "Running outside any window",
+                    selected = false,
+                    tile = {
+                        Icon(Icons.Rounded.LinkOff, null, Modifier.size(22.dp), tint = muted)
+                    },
+                    onClick = {
+                        app.select(Selection(connection.config.id, session.id))
+                        app.showDetached(session.id)
+                        onOpened()
+                    },
+                )
+            }
         }
     }
 }
@@ -668,6 +687,14 @@ private class ActivityData(
     val programs: Map<String, String>,
 )
 
+private fun priorityOf(status: ProgramStatus?, attention: Boolean) = when {
+    status?.isBlocked == true -> Priority.Blocked
+    status?.isError == true -> Priority.Error
+    status?.isWorking == true -> Priority.Working
+    status?.isDone == true || attention -> Priority.Done
+    else -> Priority.Quiet
+}
+
 /** Gathers panes from every server, each with how much it needs attention. */
 @Composable
 private fun activityData(servers: List<ServerConnection>, query: String): ActivityData {
@@ -684,6 +711,7 @@ private fun activityData(servers: List<ServerConnection>, query: String): Activi
             val attention by connection.attention.collectAsState()
             val titles by connection.titles.collectAsState()
             val programs by connection.programs.collectAsState()
+            val detached by connection.detached.collectAsState()
             titlesAll += titles
             attentionAll += attention
             statusAll += statuses
@@ -692,14 +720,11 @@ private fun activityData(servers: List<ServerConnection>, query: String): Activi
                 val view = views[session.id] ?: continue
                 for (window in view.windows) for (block in window.blocks) {
                     val status = statuses[block.id]
-                    val priority = when {
-                        status?.isBlocked == true -> Priority.Blocked
-                        status?.isError == true -> Priority.Error
-                        status?.isWorking == true -> Priority.Working
-                        status?.isDone == true || block.id in attention -> Priority.Done
-                        else -> Priority.Quiet
-                    }
-                    rows += PaneRow(connection, session, window, block, status, priority)
+                    rows += PaneRow(connection, session, window, block, status, priorityOf(status, block.id in attention))
+                }
+                for (block in detached[session.id].orEmpty()) {
+                    val status = statuses[block.id]
+                    rows += PaneRow(connection, session, block.asWindow(), block, status, priorityOf(status, block.id in attention))
                 }
             }
         }

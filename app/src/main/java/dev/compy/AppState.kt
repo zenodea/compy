@@ -100,6 +100,10 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
     private val _openRequests = MutableSharedFlow<Selection>(replay = 1, extraBufferCapacity = 1)
     val openRequests: SharedFlow<Selection> = _openRequests.asSharedFlow()
 
+    /** A session whose detached panes should be listed the next time it's on screen. */
+    private val _detachedRequest = MutableStateFlow<String?>(null)
+    val detachedRequest: StateFlow<String?> = _detachedRequest.asStateFlow()
+
     /** Colors for the app's own interface, or null to use wallpaper colors. */
     val appColors: StateFlow<TerminalColors?> = combine(settings, selection, hostThemeRevision) { s, sel, _ ->
         if (s.appColors != "host") return@combine null
@@ -151,8 +155,10 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
                         launch {
                             c.clipboard.collect { text ->
                                 if (_foreground.value) {
-                                    context.getSystemService(ClipboardManager::class.java)
-                                        .setPrimaryClip(ClipData.newPlainText("Terminal", text))
+                                    runCatching {
+                                        context.getSystemService(ClipboardManager::class.java)
+                                            .setPrimaryClip(ClipData.newPlainText("Terminal", text))
+                                    }
                                 }
                             }
                         }
@@ -183,7 +189,10 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
                     ServerConfig(s.id, s.label, s.url), http, scope,
                     clientLabel = Build.MODEL ?: "Android",
                     clientVersion = BuildConfigVersion,
-                ).also { if (_foreground.value || watching) it.connect() }
+                ).also {
+                    it.acceptsClipboard = { _foreground.value }
+                    if (_foreground.value || watching) it.connect()
+                }
             }
         }
         current.filterKeys { it !in next }.values.forEach { it.shutdown() }
@@ -234,8 +243,21 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
         scope.launch {
             val connection = _connections.value[serverId] ?: return@launch
             withTimeoutOrNull(OPEN_TIMEOUT_MS) { connection.state.first { it == ConnectionState.Connected } } ?: return@launch
-            connection.focusBlock(sessionId, blockId)
+            revealPane(connection, sessionId, blockId)
         }
+    }
+
+    /** Shows a pane in the open session, however it's currently tucked away. */
+    fun revealPane(connection: ServerConnection, sessionId: String, blockId: String) {
+        scope.launch {
+            if (runCatching { connection.revealBlock(sessionId, blockId) }.getOrDefault(true) == false) {
+                showDetached(sessionId)
+            }
+        }
+    }
+
+    fun showDetached(sessionId: String?) {
+        _detachedRequest.value = sessionId
     }
 
     private fun syncService() {

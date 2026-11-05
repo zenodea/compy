@@ -103,14 +103,15 @@ class AlertNotifier(private val context: Context, private val app: AppState) {
         if (!app.foreground.value) return false
         val selected = app.selection.value ?: return false
         if (selected.serverId != connection.config.id) return false
-        return connection.views.value[selected.sessionId]?.activeWindow?.blocks?.any { it.id == block } == true
+        return connection.views.value[selected.sessionId]?.activeWindow?.shownBlocks?.any { it.id == block } == true
     }
 
     private fun post(connection: ServerConnection, block: String, status: ProgramStatus) {
-        val found = connection.views.value.values.firstNotNullOfOrNull { view ->
-            view.windowOf(block)?.let { view to it }
+        // A detached pane isn't in any window, but its program can still need attention.
+        val view = connection.views.value.values.firstOrNull { v ->
+            v.windowOf(block) != null || connection.detached.value[v.sessionId]?.any { it.id == block } == true
         } ?: return
-        val (view, window) = found
+        val window = view.windowOf(block)
         val who = status.app?.replaceFirstChar { it.uppercase() } ?: "A program"
         val kind = alertKind(status) ?: return
         val (channel, title) = when (kind) {
@@ -123,7 +124,7 @@ class AlertNotifier(private val context: Context, private val app: AppState) {
             AlertKind.Finished -> AlertChannels.FINISHED to "$who finished"
             AlertKind.Failed -> AlertChannels.ERRORS to "$who hit an error"
         }
-        val body = status.message ?: window.displayTitle(connection.titles.value)
+        val body = status.message ?: window?.displayTitle(connection.titles.value) ?: connection.titles.value[block] ?: "Detached pane"
         val where = "${view.label} · ${connection.config.label}"
         postNotification(block, channel, title, body, where, connection.config.id, view.sessionId, kind == AlertKind.NeedsYou)
     }

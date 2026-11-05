@@ -11,9 +11,24 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlin.math.floor
 
 /** A rectangle in fractions of a window's width and height. */
 data class FractionRect(val x: Float, val y: Float, val w: Float, val h: Float)
+
+/**
+ * A floating layer's bounds as sent to the server, which refuses any that don't fit the window. A
+ * float's rounding can push an edge just past 1, so these stay a hair inside it.
+ */
+internal fun layerBounds(r: FractionRect): List<Double> {
+    fun down(v: Float) = floor(v.toDouble() * BOUNDS_STEPS) / BOUNDS_STEPS
+    val x = down(r.x).coerceIn(0.0, 0.9)
+    val y = down(r.y).coerceIn(0.0, 0.9)
+    val margin = 1.0 / BOUNDS_STEPS
+    return listOf(x, y, down(r.w).coerceAtMost(1.0 - x - margin), down(r.h).coerceAtMost(1.0 - y - margin))
+}
+
+private const val BOUNDS_STEPS = 10_000.0
 
 data class SessionSummary(val id: String, val label: String)
 
@@ -47,6 +62,15 @@ data class LayerView(
     val bounds: FractionRect,
     val layout: LayoutNode?,
     val blocks: List<BlockInfo>,
+) {
+    /** This layer on its own, for interface parts that show a window's icon and title. */
+    fun asWindow() = WindowView(id, "", blocks.firstOrNull()?.id, null, listOf(this))
+}
+
+/** A block that keeps running outside every window, shown like a window of its own. */
+fun BlockInfo.asWindow() = WindowView(
+    id, label, id, null,
+    listOf(LayerView(id, floating = false, minimized = false, FractionRect(0f, 0f, 1f, 1f), LayoutNode.Leaf(FractionRect(0f, 0f, 1f, 1f), id), listOf(this))),
 )
 
 data class WindowView(
@@ -57,6 +81,15 @@ data class WindowView(
     val layers: List<LayerView>,
 ) {
     val blocks: List<BlockInfo> get() = layers.flatMap { it.blocks }
+
+    /** Blocks that can be seen, leaving out those in minimized floating layers. */
+    val shownBlocks: List<BlockInfo> get() = layers.filterNot { it.minimized }.flatMap { it.blocks }
+
+    val tiledLayer: LayerView? get() = layers.firstOrNull { !it.floating }
+    val floatingLayers: List<LayerView> get() = layers.filter { it.floating }
+    val minimizedLayers: List<LayerView> get() = layers.filter { it.floating && it.minimized }
+
+    fun layerOf(blockId: String): LayerView? = layers.firstOrNull { l -> l.blocks.any { it.id == blockId } }
 
     /** The window's label, unless Rex generated it, when the program's own title says more. */
     fun displayTitle(titles: Map<String, String>): String {
@@ -159,6 +192,23 @@ internal fun parseView(e: JsonElement?): SessionView? {
     )
 }
 
+/** The blocks in a session.list_blocks reply that aren't in a window. */
+internal fun parseDetachedBlocks(e: JsonElement?): List<BlockInfo> =
+    e.arr().orEmpty().mapNotNull { b ->
+        val block = b.obj() ?: return@mapNotNull null
+        // The docs say to treat a placement we don't recognize like detached.
+        if (block["placement"].str() == "placed") return@mapNotNull null
+        parseBlock(block)
+    }
+
+private fun parseBlock(block: JsonObject): BlockInfo? = BlockInfo(
+    id = block["block_id"].str() ?: return null,
+    label = block["label"].str().orEmpty(),
+    creator = block["creator_name"].str().orEmpty(),
+    flavor = block["flavor"].str().orEmpty(),
+    owner = block["owner"].str(),
+)
+
 private fun parseLayer(e: JsonElement?): LayerView? {
     val l = e.obj() ?: return null
     return LayerView(
@@ -168,16 +218,7 @@ private fun parseLayer(e: JsonElement?): LayerView? {
         minimized = l["state"].str() == "minimized",
         bounds = rectOf(l["bounds"]),
         layout = parseLayout(l["layout"]),
-        blocks = l["blocks"].arr().orEmpty().mapNotNull { b ->
-            val block = b.obj() ?: return@mapNotNull null
-            BlockInfo(
-                id = block["block_id"].str() ?: return@mapNotNull null,
-                label = block["label"].str().orEmpty(),
-                creator = block["creator_name"].str().orEmpty(),
-                flavor = block["flavor"].str().orEmpty(),
-                owner = block["owner"].str(),
-            )
-        },
+        blocks = l["blocks"].arr().orEmpty().mapNotNull { b -> b.obj()?.let(::parseBlock) },
     )
 }
 

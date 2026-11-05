@@ -165,13 +165,14 @@ private fun MainLayout(
         LaunchedEffect(c) {
             c.alerts.collect { alert ->
                 val focused = alert.sessionId == app.selection.value?.sessionId && app.foreground.value &&
-                    c.views.value[alert.sessionId]?.activeWindow?.focusedBlockId == alert.blockId
+                    c.views.value[alert.sessionId]?.activeWindow?.focusedBlockId == alert.blockId &&
+                    c.views.value[alert.sessionId]?.activeWindow?.layerOf(alert.blockId)?.minimized != true
                 if (!focused) {
                     alertScope.launch {
                         val result = alertHost.showSnackbar(alert.text, actionLabel = "Open", duration = SnackbarDuration.Short)
                         if (result == SnackbarResult.ActionPerformed) {
                             app.requestOpen(dev.compy.Selection(alert.serverId, alert.sessionId))
-                            c.focusBlock(alert.sessionId, alert.blockId)
+                            app.revealPane(c, alert.sessionId, alert.blockId)
                         }
                     }
                 }

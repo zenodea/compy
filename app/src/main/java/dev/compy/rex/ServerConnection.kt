@@ -86,6 +86,13 @@ class ServerConnection(
     private val _clipboard = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val clipboard: SharedFlow<String> = _clipboard.asSharedFlow()
 
+    /** Set by the app, so large copies aren't downloaded when they couldn't be used. */
+    var acceptsClipboard: () -> Boolean = { true }
+
+    /** Blocks that keep running outside every window, by session. */
+    private val _detached = MutableStateFlow<Map<String, List<BlockInfo>>>(emptyMap())
+    val detached: StateFlow<Map<String, List<BlockInfo>>> = _detached.asStateFlow()
+
     /** The colors this host's terminals use, as last reported by any of them. */
     private val _hostTheme = MutableStateFlow<TerminalColors?>(null)
     val hostTheme: StateFlow<TerminalColors?> = _hostTheme.asStateFlow()
@@ -256,6 +263,7 @@ class ServerConnection(
         statusRead.clear()
         val keep = sessions.map { it.id }.toSet()
         _views.update { it.filterKeys(keep::contains) }
+        _detached.update { it.filterKeys(keep::contains) }
         for (session in sessions) refreshView(session.id)
     }
 
@@ -317,21 +325,37 @@ class ServerConnection(
             val old = current[sessionId]
             if (old != null && old.revision > view.revision) current else current + (sessionId to view)
         }
-        for (window in view.windows) for (block in window.blocks) {
-            if (block.creator.endsWith(".terminal") && block.id !in statusRead) {
-                statusRead += block.id
-                scope.launch {
-                    readStatus(sessionId, block.id)
-                    readTitle(sessionId, block.id)
-                    readProcess(sessionId, block.id)
-                    readFolder(sessionId, block.id)
-                }
-            }
-        }
+        for (window in view.windows) for (block in window.blocks) readDetails(sessionId, block)
+        readDetached(sessionId)
         // The server's list only names sessions, so keep labels current from the view too.
         _sessions.update { list ->
             list.map { if (it.id == sessionId && view.label.isNotEmpty()) it.copy(label = view.label) else it }
         }
+    }
+
+    private fun readDetails(sessionId: String, block: BlockInfo) {
+        if (!block.creator.endsWith(".terminal") || block.id in statusRead) return
+        statusRead += block.id
+        scope.launch {
+            readStatus(sessionId, block.id)
+            readTitle(sessionId, block.id)
+            readProcess(sessionId, block.id)
+            readFolder(sessionId, block.id)
+        }
+    }
+
+    private suspend fun readDetached(sessionId: String) {
+        val result = runCatching {
+            control?.call("session.list_blocks", buildJsonObject { put("session_id", sessionId) })
+        }.getOrNull().obj() ?: return
+        val blocks = parseDetachedBlocks(result["blocks"])
+        _detached.update { if (blocks.isEmpty()) it - sessionId else it + (sessionId to blocks) }
+        blocks.forEach { readDetails(sessionId, it) }
+    }
+
+    /** Reads the detached list again, since making a detached block doesn't change the layout. */
+    fun refreshDetached(sessionId: String) {
+        scope.launch { readDetached(sessionId) }
     }
 
     private val statusRead = ConcurrentHashMap.newKeySet<String>()
@@ -422,6 +446,7 @@ class ServerConnection(
                 val id = payload?.get("session_id").str() ?: return
                 _sessions.update { list -> list.filterNot { it.id == id } }
                 _views.update { it - id }
+                _detached.update { it - id }
                 attached -= id
             }
             "session_moved" -> scope.launch {
@@ -493,8 +518,13 @@ class ServerConnection(
                 _programs.update { it - id }
                 _folders.update { it - id }
                 _progress.update { it - id }
+                _detached.update { map ->
+                    val left = map[sessionId]?.filterNot { it.id == id } ?: return@update map
+                    if (left.isEmpty()) map - sessionId else map + (sessionId to left)
+                }
                 terminals.remove(id)?.stop()
             }
+            "block_created" -> refreshDetached(sessionId)
             "block_event" -> handleBlockEvent(sessionId, payload ?: return)
         }
     }
@@ -541,11 +571,59 @@ class ServerConnection(
                 val text = fields?.get("body").str() ?: fields?.get("title").str()
                 if (!text.isNullOrBlank()) _alerts.tryEmit(Alert(config.id, sessionId, block, text))
             }
-            "clipboard_written" -> fields?.get("text").str()?.let { _clipboard.tryEmit(it) }
+            "clipboard_written" -> {
+                val text = fields?.get("text").str()
+                if (text != null) {
+                    _clipboard.tryEmit(text)
+                } else if ((fields?.get("bytes").long() ?: 0L) > 0L && acceptsClipboard()) {
+                    // Too large for the event, so the server keeps it briefly to be read in parts.
+                    scope.launch { readLargeCopy(sessionId, block, fields?.get("id").long(), fields?.get("bytes").long() ?: 0L) }
+                }
+            }
             "title_changed" -> {
                 val title = fields?.get("title").str() ?: return
                 _titles.update { it + (block to title) }
             }
+        }
+    }
+
+    private suspend fun readLargeCopy(sessionId: String, blockId: String, id: Long?, bytes: Long) {
+        if (bytes > MAX_CLIPBOARD_BYTES) {
+            _alerts.tryEmit(Alert(config.id, sessionId, blockId, "That copy is too large for Android's clipboard (${bytes / 1024} KB)"))
+            return
+        }
+        val text = runCatching { readCopy(sessionId, blockId, id) }.getOrNull()
+        if (text != null) {
+            _clipboard.tryEmit(text)
+        } else {
+            _alerts.tryEmit(Alert(config.id, sessionId, blockId, "Couldn't copy that text from the server"))
+        }
+    }
+
+    private suspend fun readCopy(sessionId: String, blockId: String, id: Long?): String? {
+        val text = StringBuilder()
+        var copy = id
+        var offset = 0L
+        while (true) {
+            val c = control ?: return null
+            val part = c.call(
+                "com.superlogical.terminal.clipboard_read",
+                ids(sessionId, blockId) {
+                    put("args", buildJsonObject {
+                        if (copy != null) put("id", copy)
+                        put("offset", offset)
+                        put("max_bytes", CLIPBOARD_PART_BYTES)
+                    })
+                },
+            ).obj() ?: return null
+            val data = part["data"].str().orEmpty()
+            text.append(data)
+            copy = part["id"].long() ?: copy
+            if (part["eof"].bool() == true) return text.toString()
+            // A part with nothing in it would repeat forever.
+            val size = data.toByteArray(Charsets.UTF_8).size
+            if (size == 0) return null
+            offset += size
         }
     }
 
@@ -830,13 +908,99 @@ class ServerConnection(
         c.call("session.focus_block", ids(sessionId, blockId))
     }
 
-    fun newSplit(sessionId: String, anchorBlockId: String, horizontal: Boolean, onError: (String) -> Unit = {}) = act(onError) { c ->
+    /**
+     * Shows a block wherever it is, restoring its floating layer if that's minimized. Returns false
+     * if it isn't in any window, which only the list of detached panes can show.
+     */
+    suspend fun revealBlock(sessionId: String, blockId: String): Boolean {
+        val c = control ?: throw RexError("disconnected", "Not connected to ${config.label}", 0)
+        ensureAttached(sessionId)
+        val view = parseView(c.call("session.view", buildJsonObject { put("session_id", sessionId) }))
+        val window = view?.windowOf(blockId) ?: return false
+        val layer = window.layerOf(blockId)
+        if (layer?.floating == true) {
+            c.call("session.set_layer_state", layerIds(sessionId, layer.id) {
+                put("state", "normal")
+                put("focus", true)
+            })
+        }
+        c.call("session.focus_block", ids(sessionId, blockId))
+        return true
+    }
+
+    private fun layerIds(sessionId: String, layerId: String, extra: JsonObjectBuilder.() -> Unit = {}) =
+        buildJsonObject {
+            put("session_id", sessionId)
+            put("layer_id", layerId)
+            extra()
+        }
+
+    private fun boundsArray(r: FractionRect) = buildJsonArray { layerBounds(r).forEach { add(JsonPrimitive(it)) } }
+
+    fun newFloatingPane(sessionId: String, windowId: String, bounds: FractionRect, onError: (String) -> Unit = {}) = act(onError) { c ->
+        ensureAttached(sessionId)
+        c.call("session.new_layer", buildJsonObject {
+            put("session_id", sessionId)
+            put("window_id", windowId)
+            put("bounds", boundsArray(bounds))
+            put("layout", shellLayout)
+            put("focus", true)
+        })
+    }
+
+    fun floatBlock(sessionId: String, blockId: String, bounds: FractionRect, onError: (String) -> Unit = {}) = act(onError) { c ->
+        c.call("session.float_block", ids(sessionId, blockId) { put("bounds", boundsArray(bounds)) })
+    }
+
+    fun setLayerMinimized(sessionId: String, layerId: String, minimized: Boolean, onError: (String) -> Unit = {}) = act(onError) { c ->
+        c.call("session.set_layer_state", layerIds(sessionId, layerId) {
+            put("state", if (minimized) "minimized" else "normal")
+            if (!minimized) put("focus", true)
+        })
+    }
+
+    /** Brings a floating layer to the front and gives it focus. */
+    fun focusLayer(sessionId: String, layerId: String, onError: (String) -> Unit = {}) = setLayerMinimized(sessionId, layerId, false, onError)
+
+    fun raiseLayer(sessionId: String, layerId: String) = act { c ->
+        c.call("session.raise_layer", layerIds(sessionId, layerId))
+    }
+
+    fun resizeLayer(sessionId: String, layerId: String, bounds: FractionRect, onError: (String) -> Unit = {}) = act(onError) { c ->
+        c.call("session.resize_layer", layerIds(sessionId, layerId) { put("bounds", boundsArray(bounds)) })
+    }
+
+    fun closeLayer(sessionId: String, layerId: String, onError: (String) -> Unit = {}) = act(onError) { c ->
+        c.call("session.close_layer", layerIds(sessionId, layerId))
+    }
+
+    fun detachBlock(sessionId: String, blockId: String, onError: (String) -> Unit = {}) = act(onError) { c ->
+        c.call("session.detach_block", ids(sessionId, blockId))
+    }
+
+    /** Places a detached block in a window of its own. A window can't be made empty, so it starts with a shell. */
+    fun placeInNewWindow(sessionId: String, blockId: String, onError: (String) -> Unit = {}) = act(onError) { c ->
+        ensureAttached(sessionId)
+        val created = c.call("session.new_window", buildJsonObject {
+            put("session_id", sessionId)
+            put("layout", shellLayout)
+        }).obj()
+        val shell = created?.get("block_ids").arr()?.firstOrNull().str() ?: throw RexError("bad_reply", "The server didn't make the window", 0)
+        try {
+            c.call("session.move_block", ids(sessionId, blockId) { put("anchor_block_id", shell) })
+        } finally {
+            c.call("block.close", ids(sessionId, shell))
+        }
+        c.call("session.focus_block", ids(sessionId, blockId))
+    }
+
+    fun newSplit(sessionId: String, anchorBlockId: String, horizontal: Boolean, before: Boolean = false, onError: (String) -> Unit = {}) = act(onError) { c ->
         ensureAttached(sessionId)
         c.call("session.new_split", buildJsonObject {
             put("session_id", sessionId)
             put("anchor_id", anchorBlockId)
             put("direction", if (horizontal) "horizontal" else "vertical")
-            put("side", "after")
+            put("side", if (before) "before" else "after")
             put("layout", shellLayout)
             put("focus", true)
         })
@@ -912,5 +1076,10 @@ class ServerConnection(
     private companion object {
         const val MAX_THEME_PROBES = 6
         const val THEME_PROBE_WAIT_MS = 1_500L
+        const val CLIPBOARD_PART_BYTES = 262_144
+
+        // Android sends clipboard text in one Binder call, which is limited to about 1 MB and
+        // holds each character in two bytes.
+        const val MAX_CLIPBOARD_BYTES = 400_000L
     }
 }

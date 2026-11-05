@@ -122,6 +122,7 @@ fun CommandPalette(
     window: WindowView?,
     onClose: () -> Unit,
     onFind: () -> Unit,
+    onDetached: () -> Unit,
     onOverview: () -> Unit,
     onArrange: () -> Unit,
     onCompose: () -> Unit,
@@ -162,7 +163,9 @@ fun CommandPalette(
             if (paneCount > 1) add(if (zoomed) "Show all panes" else "Zoom pane", "maximize") { connection.zoomBlock(session, block, !zoomed) }
             add("Close pane", "kill") { connection.closeBlock(session, block, onMessage) }
         }
-        if (paneCount > 1) add("Arrange panes", "move swap layout", onArrange)
+        if ((window?.tiledLayer?.blocks?.size ?: 0) > 1) add("Arrange panes", "move swap layout", onArrange)
+        window?.let { add("New floating pane", "popup layer overlay") { connection.newFloatingPane(session, it.id, nextFloatBounds(it), onMessage) } }
+        add("Detached panes", "background hidden running list", onDetached)
         add("New window", "tab") { connection.newWindow(session, onMessage) }
         add("All windows", "overview tabs", onOverview)
     }

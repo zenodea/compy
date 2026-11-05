@@ -4,26 +4,42 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.animation.core.AnimationVector4D
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.TwoWayConverter
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Remove
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
@@ -38,20 +54,28 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.compy.data.SizeMode
 import dev.compy.rex.FractionRect
+import dev.compy.rex.LayerView
 import dev.compy.rex.LayoutNode
 import dev.compy.rex.TerminalSession
 import dev.compy.rex.WindowView
@@ -111,11 +135,13 @@ fun PaneArea(
     arranging: Boolean = false,
     enabled: Boolean = true,
     onDrop: (dragged: String, target: String, zone: DropZone) -> Unit = { _, _, _ -> },
+    onMessage: (String) -> Unit = {},
 ) {
-    val tiled = window.layers.firstOrNull { !it.floating }
+    val tiled = window.tiledLayer
     val overrides = remember(window.id) { mutableStateMapOf<String, Float>() }
     // Panes already here when the window opens shouldn't animate in.
     val known = remember(window.id) { mutableSetOf<String>() }
+    val knownLayers = remember(window.id) { mutableSetOf<String>() }
     Box(modifier) {
         val zoomed = window.zoomedBlockId
         val panes = mutableListOf<Pair<String, FractionRect>>()
@@ -151,26 +177,36 @@ fun PaneArea(
                 }
             }
         }
-        // Floating layers sit above the layout, in order from back to front.
-        if (zoomed == null) {
-            window.layers.filter { it.floating && !it.minimized }.forEach { layer ->
-                val inner = mutableListOf<Pair<String, FractionRect>>()
-                layer.layout?.let { place(it, layer.bounds, overrides, inner, mutableListOf()) }
-                inner.forEach { (blockId, rect) ->
-                    key(blockId) {
-                        Box(Modifier.zIndex(2f).fractionalPane({ rect }, { Gap / 2 })) {
-                            TerminalPane(
-                                controller = controller,
-                                blockId = blockId,
-                                focused = blockId == controller.focusedBlockId,
-                                showFocusRing = true,
-                                interactive = !arranging && enabled,
-                                onTapped = { onPaneTapped(blockId) },
-                            )
-                        }
-                    }
-                }
+        // Floating layers sit above the layout. The server lists them from back to front, and
+        // zIndex keeps that order without moving the terminals around in the composition.
+        val floating = window.floatingLayers
+        val front = floating.lastOrNull { !it.minimized }?.id
+        val firstFloats = knownLayers.isEmpty()
+        floating.sortedBy { it.id }.forEach { layer ->
+            key(layer.id) {
+                val isNew = !firstFloats && layer.id !in knownLayers
+                SideEffect { knownLayers += layer.id }
+                FloatingLayer(
+                    controller = controller,
+                    layer = layer,
+                    stackIndex = floating.indexOf(layer),
+                    isFront = layer.id == front,
+                    isNew = isNew,
+                    // A zoomed pane fills the window, and arranging only moves the tiled panes.
+                    shown = !layer.minimized && zoomed == null && !arranging,
+                    enabled = enabled && !arranging,
+                    onPaneTapped = onPaneTapped,
+                    onMessage = onMessage,
+                )
             }
+        }
+        if (panes.isEmpty() && floating.isNotEmpty() && floating.all { it.minimized }) {
+            Text(
+                "Every pane here is minimized. Tap one below to bring it back.",
+                Modifier.align(Alignment.Center).padding(32.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         if (!arranging && zoomed == null) {
             splits.forEach { placed ->
@@ -216,6 +252,229 @@ private fun Modifier.fractionalPane(rect: () -> FractionRect, inset: () -> Dp): 
     val bottom = (parentH * (r.y + r.h)).roundToInt() - i
     val placeable = measurable.measure(Constraints.fixed(maxOf(1, right - left), maxOf(1, bottom - top)))
     layout(parentW, parentH) { placeable.place(left, top) }
+}
+
+private val BoundsConverter = TwoWayConverter<FractionRect, AnimationVector4D>(
+    { AnimationVector4D(it.x, it.y, it.w, it.h) },
+    { FractionRect(it.v1, it.v2, it.v3, it.v4) },
+)
+
+/**
+ * A floating pane: a card with a bar to drag it by, minimize and close buttons, and a corner to
+ * resize it from. Moves stay local until the finger lifts, then go to the server in one change.
+ */
+@Composable
+private fun FloatingLayer(
+    controller: WorkspaceController,
+    layer: LayerView,
+    stackIndex: Int,
+    isFront: Boolean,
+    isNew: Boolean,
+    shown: Boolean,
+    enabled: Boolean,
+    onPaneTapped: (String) -> Unit,
+    onMessage: (String) -> Unit,
+) {
+    val connection = controller.connection
+    val sessionId = controller.sessionId
+    val scheme = MaterialTheme.colorScheme
+    val titles by connection.titles.collectAsStateWithLifecycle()
+    val visible = remember(layer.id) { MutableTransitionState(shown && !isNew) }
+    visible.targetState = shown
+    val bounds = remember(layer.id) { Animatable(layer.bounds, BoundsConverter) }
+    // What the finger set, read only while laying out so that dragging never recomposes the card.
+    var local by remember(layer.id) { mutableStateOf<FractionRect?>(null) }
+    val gesture = remember(layer.id) { LayerGesture() }
+    var confirmClose by remember(layer.id) { mutableStateOf(false) }
+    LaunchedEffect(layer.bounds) {
+        if (gesture.active) return@LaunchedEffect
+        local?.let {
+            bounds.snapTo(it)
+            local = null
+        }
+        bounds.animateTo(layer.bounds, motion())
+    }
+    fun finish(rect: FractionRect) {
+        gesture.active = false
+        connection.resizeLayer(sessionId, layer.id, rect) { message ->
+            local = null
+            onMessage(message)
+        }
+    }
+    val focused = layer.blocks.any { it.id == controller.focusedBlockId }
+    val ring by animateColorAsState(
+        if (focused) scheme.primary.copy(alpha = 0.75f) else scheme.outlineVariant,
+        motion(MOTION_SHORT),
+        label = "float-ring",
+    )
+    Box(
+        Modifier
+            .zIndex(2f + stackIndex)
+            .layout { measurable, constraints ->
+                gesture.parentW = constraints.maxWidth.toFloat().coerceAtLeast(1f)
+                gesture.parentH = constraints.maxHeight.toFloat().coerceAtLeast(1f)
+                val placeable = measurable.measure(constraints)
+                layout(placeable.width, placeable.height) { placeable.place(0, 0) }
+            }
+            .fractionalPane({ local ?: bounds.value }, { 0.dp }),
+    ) {
+        AnimatedVisibility(
+            visible,
+            enter = fadeIn(motion(MOTION_SHORT)) + scaleIn(motion(), initialScale = 0.88f),
+            exit = fadeOut(motion(MOTION_SHORT)) + scaleOut(motion(), targetScale = 0.7f, transformOrigin = TransformOrigin(0.5f, 1f)),
+        ) {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .shadow(10.dp, PaneShape)
+                    .clip(PaneShape)
+                    .background(scheme.surfaceContainerHigh)
+                    .border(1.dp, ring, PaneShape),
+            ) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(FloatBarHeight)
+                        .pointerInput(layer.id) { detectTapGestures { connection.focusLayer(sessionId, layer.id, onMessage) } }
+                        .pointerInput(layer.id) {
+                            var rect = FractionRect(0f, 0f, 1f, 1f)
+                            detectDragGestures(
+                                onDragStart = {
+                                    gesture.active = true
+                                    rect = local ?: bounds.value
+                                    connection.raiseLayer(sessionId, layer.id)
+                                },
+                                onDragEnd = { finish(rect) },
+                                onDragCancel = { finish(rect) },
+                            ) { change, amount ->
+                                change.consume()
+                                rect = moved(rect, amount.x / gesture.parentW, amount.y / gesture.parentH)
+                                local = rect
+                            }
+                        }
+                        .padding(start = 14.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        layer.asWindow().displayTitle(titles),
+                        Modifier.weight(1f),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = scheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    RoundButton(Icons.Rounded.Remove, "Minimize", size = 30.dp, filled = false, tint = scheme.onSurfaceVariant) {
+                        connection.setLayerMinimized(sessionId, layer.id, true, onMessage)
+                    }
+                    RoundButton(Icons.Rounded.Close, "Close floating pane", size = 30.dp, filled = false, tint = scheme.onSurfaceVariant) {
+                        confirmClose = true
+                    }
+                }
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    val inner = mutableListOf<Pair<String, FractionRect>>()
+                    layer.layout?.let { place(it, FractionRect(0f, 0f, 1f, 1f), emptyMap(), inner, mutableListOf()) }
+                    inner.forEach { (blockId, rect) ->
+                        key(blockId) {
+                            Box(Modifier.fractionalPane({ rect }, { 0.dp })) {
+                                TerminalPane(
+                                    controller = controller,
+                                    blockId = blockId,
+                                    focused = blockId == controller.focusedBlockId,
+                                    showFocusRing = inner.size > 1,
+                                    interactive = enabled,
+                                    onTapped = {
+                                        if (!isFront) connection.raiseLayer(sessionId, layer.id)
+                                        onPaneTapped(blockId)
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    // The corner to resize from, which holds terminal sizes until it's let go.
+                    Box(
+                        Modifier
+                            .align(Alignment.BottomEnd)
+                            .size(36.dp)
+                            .pointerInput(layer.id) {
+                                var rect = FractionRect(0f, 0f, 1f, 1f)
+                                detectDragGestures(
+                                    onDragStart = {
+                                        gesture.active = true
+                                        rect = local ?: bounds.value
+                                        if (!isFront) connection.raiseLayer(sessionId, layer.id)
+                                        controller.holdSizes(true)
+                                    },
+                                    onDragEnd = {
+                                        controller.holdSizes(false)
+                                        finish(rect)
+                                    },
+                                    onDragCancel = {
+                                        controller.holdSizes(false)
+                                        finish(rect)
+                                    },
+                                ) { change, amount ->
+                                    change.consume()
+                                    rect = resized(rect, amount.x / gesture.parentW, amount.y / gesture.parentH)
+                                    local = rect
+                                }
+                            }
+                            .padding(9.dp)
+                            .drawBehind {
+                                val grip = scheme.onSurface.copy(alpha = 0.55f)
+                                val stroke = 2.dp.toPx()
+                                val w = size.width
+                                val h = size.height
+                                drawLine(grip, Offset(w, h * 0.2f), Offset(w * 0.2f, h), stroke, StrokeCap.Round)
+                                drawLine(grip, Offset(w, h * 0.62f), Offset(w * 0.62f, h), stroke, StrokeCap.Round)
+                            },
+                    )
+                }
+            }
+        }
+    }
+    if (confirmClose) {
+        AlertDialog(
+            onDismissRequest = { confirmClose = false },
+            title = { Text("Close this floating pane?") },
+            text = { Text("This stops the program running in it.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmClose = false
+                    connection.closeLayer(sessionId, layer.id, onMessage)
+                }) { Text("Close") }
+            },
+            dismissButton = { TextButton(onClick = { confirmClose = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+/** State a floating layer's gestures share without recomposing it. */
+private class LayerGesture {
+    var active = false
+    var parentW = 1f
+    var parentH = 1f
+}
+
+private const val MIN_FLOAT_WIDTH = 0.3f
+private const val MIN_FLOAT_HEIGHT = 0.2f
+private val FloatBarHeight = 34.dp
+
+/** Moves a floating layer, keeping it inside the window as the server requires. */
+internal fun moved(r: FractionRect, dx: Float, dy: Float) = r.copy(
+    x = (r.x + dx).coerceIn(0f, (1f - r.w).coerceAtLeast(0f)),
+    y = (r.y + dy).coerceIn(0f, (1f - r.h).coerceAtLeast(0f)),
+)
+
+/** Resizes a floating layer from its bottom right corner, within the window and a usable minimum. */
+internal fun resized(r: FractionRect, dx: Float, dy: Float) = r.copy(
+    w = (r.w + dx).coerceIn(minOf(MIN_FLOAT_WIDTH, 1f - r.x), 1f - r.x),
+    h = (r.h + dy).coerceIn(minOf(MIN_FLOAT_HEIGHT, 1f - r.y), 1f - r.y),
+)
+
+/** Where the next floating pane goes: mostly filling a phone screen, stepped so none hide another. */
+internal fun nextFloatBounds(window: WindowView): FractionRect {
+    val step = window.floatingLayers.size % 4 * 0.03f
+    return FractionRect(0.06f + step, 0.06f + step, 0.84f, 0.66f)
 }
 
 /** One pane's place in the window: it glides to new positions and fades when hidden by a zoom. */
@@ -322,6 +581,122 @@ private fun SplitHandle(
 
 enum class DropZone { Left, Right, Top, Bottom, Swap }
 
+/** Which side of a pane a new one goes on, from where the finger is in it: its nearest edge. */
+internal fun splitZone(x: Float, y: Float): DropZone {
+    val dx = x - 0.5f
+    val dy = y - 0.5f
+    return if (kotlin.math.abs(dx) > kotlin.math.abs(dy)) {
+        if (dx < 0) DropZone.Left else DropZone.Right
+    } else {
+        if (dy < 0) DropZone.Top else DropZone.Bottom
+    }
+}
+
+/** The part of a pane that a drop in this zone would take. */
+internal fun zoneRect(r: FractionRect, zone: DropZone): FractionRect = when (zone) {
+    DropZone.Left -> FractionRect(r.x, r.y, r.w / 2, r.h)
+    DropZone.Right -> FractionRect(r.x + r.w / 2, r.y, r.w / 2, r.h)
+    DropZone.Top -> FractionRect(r.x, r.y, r.w, r.h / 2)
+    DropZone.Bottom -> FractionRect(r.x, r.y + r.h / 2, r.w, r.h / 2)
+    DropZone.Swap -> r
+}
+
+/** A mini window being dragged out of the background, in the workspace's own coordinates. */
+class PaneSpawn {
+    var pointer by mutableStateOf<Offset?>(null)
+    var armed by mutableStateOf(false)
+}
+
+/** Where a dragged mini window would land. With no anchor, the window has no panes to split. */
+data class SpawnDrop(val anchor: String?, val zone: DropZone, val rect: FractionRect)
+
+/** Works out the landing place under a point given as a fraction of the pane area. */
+internal fun spawnDrop(window: WindowView, fx: Float, fy: Float): SpawnDrop? {
+    if (fx < 0f || fx >= 1f || fy < 0f || fy >= 1f) return null
+    val zoomed = window.zoomedBlockId
+    if (zoomed != null) {
+        return splitZone(fx, fy).let { SpawnDrop(zoomed, it, zoneRect(FractionRect(0f, 0f, 1f, 1f), it)) }
+    }
+    val whole = FractionRect(0f, 0f, 1f, 1f)
+    // The front floating pane wins, then the ones behind it, then the layout under them.
+    val layers = window.floatingLayers.filterNot { it.minimized }.reversed() + listOfNotNull(window.tiledLayer)
+    var any = false
+    for (layer in layers) {
+        val panes = mutableListOf<Pair<String, FractionRect>>()
+        layer.layout?.let { place(it, if (layer.floating) layer.bounds else whole, emptyMap(), panes, mutableListOf()) }
+        any = any || panes.isNotEmpty()
+        val hit = panes.firstOrNull { (_, r) -> fx >= r.x && fx < r.x + r.w && fy >= r.y && fy < r.y + r.h } ?: continue
+        val zone = splitZone((fx - hit.second.x) / hit.second.w, (fy - hit.second.y) / hit.second.h)
+        return SpawnDrop(hit.first, zone, zoneRect(hit.second, zone))
+    }
+    return if (any) null else SpawnDrop(null, DropZone.Swap, whole)
+}
+
+/** The mini window under the finger and the highlight showing where it would land. */
+@Composable
+fun PaneSpawnOverlay(spawn: PaneSpawn, drop: SpawnDrop?, area: Rect?, modifier: Modifier = Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(12.dp)
+    val density = LocalDensity.current
+    val highlight = remember { Animatable(FractionRect(0f, 0f, 1f, 1f), BoundsConverter) }
+    val fade by animateFloatAsState(if (drop != null) 1f else 0f, motion(MOTION_SHORT), label = "spawn-highlight")
+    var wasShown by remember { mutableStateOf(false) }
+    LaunchedEffect(drop?.rect) {
+        val rect = drop?.rect
+        if (rect != null) {
+            // It fades in where it's needed, then glides between zones.
+            if (wasShown) highlight.animateTo(rect, motion(MOTION_SHORT)) else highlight.snapTo(rect)
+        }
+        wasShown = rect != null
+    }
+    Box(modifier.fillMaxSize()) {
+        if (area != null && fade > 0f) {
+            Box(
+                Modifier
+                    .offset { IntOffset(area.left.roundToInt(), area.top.roundToInt()) }
+                    .size(with(density) { area.width.toDp() }, with(density) { area.height.toDp() }),
+            ) {
+                Box(
+                    Modifier
+                        .fractionalPane({ highlight.value }, { Gap / 2 })
+                        .graphicsLayer { alpha = fade }
+                        .clip(PaneShape)
+                        .background(scheme.primary.copy(alpha = 0.3f))
+                        .border(2.dp, scheme.primary, PaneShape),
+                )
+            }
+        }
+        val visible = remember { MutableTransitionState(false) }
+        visible.targetState = spawn.pointer != null
+        val last = remember { floatArrayOf(0f, 0f) }
+        AnimatedVisibility(
+            visible,
+            Modifier.offset {
+                spawn.pointer?.let {
+                    last[0] = it.x
+                    last[1] = it.y
+                }
+                // Held above the finger, so the finger doesn't hide it.
+                IntOffset(last[0].roundToInt() - 44.dp.roundToPx(), last[1].roundToInt() - 92.dp.roundToPx())
+            },
+            enter = fadeIn(motion(MOTION_SHORT)) + scaleIn(motion(MOTION_SHORT), initialScale = 0.6f),
+            exit = fadeOut(motion(MOTION_SHORT)) + scaleOut(motion(MOTION_SHORT), targetScale = 0.6f),
+        ) {
+            Box(
+                Modifier
+                    .size(88.dp, 60.dp)
+                    .shadow(8.dp, shape)
+                    .clip(shape)
+                    .background(scheme.surfaceContainerHighest)
+                    .border(1.5.dp, scheme.primary, shape),
+                contentAlignment = Alignment.Center,
+            ) {
+                androidx.compose.material3.Icon(Icons.Rounded.Add, null, tint = scheme.primary)
+            }
+        }
+    }
+}
+
 private fun zoneFor(x: Float, y: Float): DropZone {
     val dx = x - 0.5f
     val dy = y - 0.5f
@@ -382,13 +757,7 @@ private fun BoxScope.ArrangeOverlay(
         val r = target.second
         val fx = (pointer.x / widthPx - r.x) / r.w
         val fy = (pointer.y / heightPx - r.y) / r.h
-        val highlight = when (zoneFor(fx, fy)) {
-            DropZone.Left -> FractionRect(r.x, r.y, r.w / 2, r.h)
-            DropZone.Right -> FractionRect(r.x + r.w / 2, r.y, r.w / 2, r.h)
-            DropZone.Top -> FractionRect(r.x, r.y, r.w, r.h / 2)
-            DropZone.Bottom -> FractionRect(r.x, r.y + r.h / 2, r.w, r.h / 2)
-            DropZone.Swap -> r
-        }
+        val highlight = zoneRect(r, zoneFor(fx, fy))
         Box(
             paneModifier(highlight, fullW, fullH, Gap / 2)
                 .clip(PaneShape)
@@ -521,29 +890,38 @@ fun TerminalPane(
 /** A read-only preview of a window's panes, used in the overview. */
 @Composable
 fun WindowThumbnail(controller: WorkspaceController, window: WindowView, modifier: Modifier = Modifier) {
-    val app = controller.app
-    val tiled = window.layers.firstOrNull { !it.floating }
     BoxWithConstraints(modifier) {
         val panes = mutableListOf<Pair<String, FractionRect>>()
-        tiled?.layout?.let { place(it, FractionRect(0f, 0f, 1f, 1f), emptyMap(), panes, mutableListOf()) }
+        window.tiledLayer?.layout?.let { place(it, FractionRect(0f, 0f, 1f, 1f), emptyMap(), panes, mutableListOf()) }
+        // Later entries draw on top, so floating panes sit above the layout as they do in the window.
+        window.floatingLayers.filterNot { it.minimized }.forEach { layer ->
+            layer.layout?.let { place(it, layer.bounds, emptyMap(), panes, mutableListOf()) }
+        }
         val w = maxWidth
         val h = maxHeight
         panes.forEach { (blockId, rect) ->
             key(blockId) {
-                val session = remember(blockId) { controller.connection.terminal(controller.sessionId, blockId) }
-                AndroidView(
-                    modifier = paneModifier(rect, w, h, 2.dp).clip(RoundedCornerShape(12.dp)),
-                    factory = { ctx ->
-                        TerminalView(ctx) { app.fonts.value }.also { view ->
-                            view.interactive = false
-                            view.bind(session)
-                        }
-                    },
-                    onRelease = { it.bind(null) },
-                )
+                TerminalPreview(controller, blockId, paneModifier(rect, w, h, 2.dp).clip(RoundedCornerShape(12.dp)))
             }
         }
     }
+}
+
+/** A live terminal that can only be looked at. */
+@Composable
+fun TerminalPreview(controller: WorkspaceController, blockId: String, modifier: Modifier = Modifier) {
+    val app = controller.app
+    val session = remember(blockId) { controller.connection.terminal(controller.sessionId, blockId) }
+    AndroidView(
+        modifier = modifier,
+        factory = { ctx ->
+            TerminalView(ctx) { app.fonts.value }.also { view ->
+                view.interactive = false
+                view.bind(session)
+            }
+        },
+        onRelease = { it.bind(null) },
+    )
 }
 
 @Composable

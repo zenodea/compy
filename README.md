@@ -17,6 +17,7 @@ In Compy, tap **Scan pairing code** and scan what it shows, or type the `ts.net`
 
 - **Terminals:** live panes with scrollback, drawn by libghostty-vt.
 - **Layout:** Rex's real split layout, with draggable dividers and an arrange mode. These edits change the layout for every connected client.
+- **Panes:** press empty space and drag the mini window onto a pane to split it where the highlight shows. Float panes with a bar to drag, a corner to resize and a tray for minimized ones, or detach them to keep them running outside any window.
 - **Sizes:** each session either fits terminals to this screen while Compy is open, or keeps another device's size with pan and zoom.
 - **Servers:** all your servers in one list. Activity view groups panes by what needs you.
 - **Commands:** tap `⌘` for a searchable palette of Compy's commands and the host's Rex actions; hold it to latch the modifier.

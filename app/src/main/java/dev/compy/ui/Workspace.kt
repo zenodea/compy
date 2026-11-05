@@ -14,6 +14,7 @@ import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
@@ -26,9 +27,13 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -42,6 +47,7 @@ import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.ViewSidebar
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -100,7 +106,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import android.content.res.Configuration
 import android.view.HapticFeedbackConstants
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextOverflow
@@ -108,11 +116,14 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.compy.AppState
 import dev.compy.data.SizeMode
+import dev.compy.rex.BlockInfo
 import dev.compy.rex.ConnectionState
+import dev.compy.rex.LayerView
 import dev.compy.rex.RexKey
 import dev.compy.rex.ServerConnection
 import dev.compy.rex.SessionView
 import dev.compy.rex.WindowView
+import dev.compy.rex.asWindow
 
 /** The right-hand side of the app: one session's panes, tabs, keys and actions. */
 @OptIn(ExperimentalLayoutApi::class)
@@ -148,6 +159,18 @@ fun Workspace(
     var composer by rememberSaveable(sessionId) { mutableStateOf(false) }
     var palette by rememberSaveable(sessionId) { mutableStateOf(false) }
     var finding by rememberSaveable(sessionId) { mutableStateOf(false) }
+    var showDetached by rememberSaveable(sessionId) { mutableStateOf(false) }
+    val detachedRequest by app.detachedRequest.collectAsStateWithLifecycle()
+    LaunchedEffect(detachedRequest, sessionId) {
+        if (detachedRequest == sessionId) {
+            showDetached = true
+            app.showDetached(null)
+        }
+    }
+    val shownBlocks = window?.shownBlocks?.map { it.id }.orEmpty()
+    val minimized = window?.minimizedLayers.orEmpty()
+    val tray = remember { MutableTransitionState(minimized.isNotEmpty()) }
+    tray.targetState = minimized.isNotEmpty()
     val progress by connection.progress.collectAsStateWithLifecycle()
     controller.showMessage = onMessage
     val rootView = LocalView.current
@@ -160,8 +183,9 @@ fun Workspace(
         }
     }
 
-    LaunchedEffect(window?.focusedBlockId, window?.id) {
-        controller.focusedBlockId = window?.focusedBlockId ?: window?.blocks?.firstOrNull()?.id
+    LaunchedEffect(window?.focusedBlockId, window?.id, shownBlocks) {
+        // Typing shouldn't go to a pane that's minimized out of sight.
+        controller.focusedBlockId = window?.focusedBlockId?.takeIf { it in shownBlocks } ?: shownBlocks.firstOrNull()
         controller.focusedBlockId?.let {
             connection.clearAttention(it)
             app.notifier.cancel(it)
@@ -177,7 +201,9 @@ fun Workspace(
         if (imeVisible) target.hideKeyboard() else target.showKeyboard()
     }
     val arrangeInset = animateDpAsState(if (arranging) 28.dp else 0.dp, motion(), label = "arrange")
-    LaunchedEffect(layoutMoving) { controller.holdSizes(layoutMoving) }
+    // The tray changes the height terminals have, so it counts as layout moving too.
+    val sizesHeld = layoutMoving || !tray.isIdle
+    LaunchedEffect(sizesHeld) { controller.holdSizes(sizesHeld) }
     // The sidebar already lists every window, so the tab strip only shows without it.
     val showTabs = compact || sidebarHidden
 
@@ -190,8 +216,72 @@ fun Workspace(
     val overviewSettled by remember { derivedStateOf { overviewProgress.value >= 1f } }
     val overviewClosed by remember { derivedStateOf { overviewProgress.value == 0f } }
 
+    val spawn = remember(sessionId) { PaneSpawn() }
+    var origin by remember { mutableStateOf(Offset.Zero) }
+    val localArea = areaBounds?.translate(-origin)
+    val latestWindow = rememberUpdated(window)
+    val latestArea = rememberUpdated(localArea)
+    fun dropAt(point: Offset?): SpawnDrop? {
+        val shown = latestWindow.value ?: return null
+        val area = latestArea.value ?: return null
+        if (point == null || area.width <= 0f || area.height <= 0f) return null
+        return spawnDrop(shown, (point.x - area.left) / area.width, (point.y - area.top) / area.height)
+    }
+    val spawnTarget by remember { derivedStateOf { if (spawn.armed) dropAt(spawn.pointer) else null } }
+    LaunchedEffect(spawnTarget?.anchor, spawnTarget?.zone) {
+        if (spawnTarget != null) rootView.performHapticFeedback(HapticFeedbackConstants.SEGMENT_FREQUENT_TICK)
+    }
+
     CompositionLocalProvider(LocalBlockProgress provides progress) {
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .onGloballyPositioned { origin = it.boundsInRoot().topLeft },
+    ) {
+        // Sits under everything, so it only gets touches on empty space between the controls.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(arranging, overviewClosed, window != null) {
+                    if (arranging || !overviewClosed || window == null) return@pointerInput
+                    awaitEachGesture {
+                        val down = awaitFirstDown()
+                        spawn.pointer = down.position
+                        spawn.armed = false
+                        rootView.performHapticFeedback(HapticFeedbackConstants.GESTURE_START)
+                        try {
+                            while (true) {
+                                val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                                if (!change.pressed) {
+                                    // A cancelled touch ends consumed, and shouldn't place anything.
+                                    val drop = if (spawn.armed && !change.isConsumed) dropAt(change.position) else null
+                                    when {
+                                        drop == null -> Unit
+                                        // Rex can't split an empty layout, so this pane floats.
+                                        drop.anchor == null -> latestWindow.value?.let { connection.newFloatingPane(sessionId, it.id, nextFloatBounds(it), onMessage) }
+                                        else -> connection.newSplit(
+                                            sessionId, drop.anchor,
+                                            horizontal = drop.zone == DropZone.Left || drop.zone == DropZone.Right,
+                                            before = drop.zone == DropZone.Left || drop.zone == DropZone.Top,
+                                            onError = onMessage,
+                                        )
+                                    }
+                                    if (drop != null) rootView.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                                    break
+                                }
+                                // A press that doesn't move is a stray tap, not a pane being placed.
+                                if ((change.position - down.position).getDistance() > viewConfiguration.touchSlop) spawn.armed = true
+                                spawn.pointer = change.position
+                                change.consume()
+                            }
+                        } finally {
+                            spawn.pointer = null
+                            spawn.armed = false
+                        }
+                    }
+                },
+        )
         if (overviewShown && view != null) {
             WindowOverview(
                 controller, view, progress = { overviewProgress.value },
@@ -212,7 +302,7 @@ fun Workspace(
         ) {
             if (compact) {
                 Box(Modifier.graphicsLayer { alpha = 1f - overviewProgress.value }) {
-                    CompactTopBar(controller, view, window, onShowSidebar, onOverview = { overview = true }, onArrange = { arranging = true }, onMessage = onMessage, onOpenPalette = { palette = true })
+                    CompactTopBar(controller, view, window, onShowSidebar, onOverview = { overview = true }, onArrange = { arranging = true }, onMessage = onMessage, onOpenPalette = { palette = true }, onOpenDetached = { showDetached = true })
                 }
             }
             var lastOffline by remember { mutableStateOf("") }
@@ -300,6 +390,7 @@ fun Workspace(
                                             DropZone.Bottom -> connection.moveBlock(sessionId, dragged, target, false, false, onMessage)
                                         }
                                     },
+                                    onMessage = onMessage,
                                 )
                             }
                         }
@@ -341,6 +432,13 @@ fun Workspace(
                         } else if (view != null) {
                             Column {
                                 AnimatedVisibility(
+                                    tray,
+                                    enter = expandVertically(motion()) + fadeIn(motion(MOTION_SHORT)),
+                                    exit = shrinkVertically(motion()) + fadeOut(motion(MOTION_SHORT)),
+                                ) {
+                                    MinimizedTray(controller, minimized, onMessage)
+                                }
+                                AnimatedVisibility(
                                     showTabs,
                                     enter = expandVertically(motion(MOTION_LONG)) + fadeIn(motion(MOTION_LONG)),
                                     exit = shrinkVertically(motion(MOTION_LONG)) + fadeOut(motion(MOTION_SHORT)),
@@ -371,13 +469,19 @@ fun Workspace(
                         onShowSidebar = onShowSidebar,
                         onOpenComposer = { composer = true },
                         onOpenPalette = { palette = true },
+                        onOpenDetached = { showDetached = true },
                         onMessage = onMessage,
                     )
                 }
             }
         }
+        PaneSpawnOverlay(spawn, spawnTarget, localArea, Modifier.zIndex(3f))
     }
 
+    }
+
+    if (showDetached) {
+        DetachedSheet(controller, window, onClose = { showDetached = false }, onMessage = onMessage)
     }
 
     if (composer) {
@@ -388,6 +492,7 @@ fun Workspace(
             controller, window,
             onClose = { palette = false },
             onFind = { finding = true },
+            onDetached = { showDetached = true },
             onOverview = { overview = true },
             onArrange = { arranging = true },
             onCompose = { composer = true },
@@ -421,6 +526,7 @@ private fun CompactTopBar(
     onArrange: () -> Unit,
     onMessage: (String) -> Unit,
     onOpenPalette: () -> Unit,
+    onOpenDetached: () -> Unit,
 ) {
     val connection = controller.connection
     val folders by connection.folders.collectAsStateWithLifecycle()
@@ -451,7 +557,7 @@ private fun CompactTopBar(
             )
         }
         RoundButton(Icons.Rounded.GridView, "All windows", filled = false, tint = muted, onClick = onOverview)
-        ActionsMenu(controller, view, window, onArrange, onMessage, filled = false, onOpenPalette = onOpenPalette)
+        ActionsMenu(controller, view, window, onArrange, onMessage, filled = false, onOpenPalette = onOpenPalette, onOpenDetached = onOpenDetached)
     }
 }
 
@@ -467,6 +573,7 @@ private fun SideRail(
     onShowSidebar: () -> Unit,
     onOpenComposer: () -> Unit,
     onOpenPalette: () -> Unit,
+    onOpenDetached: () -> Unit,
     onMessage: (String) -> Unit,
 ) {
     Column(
@@ -480,7 +587,7 @@ private fun SideRail(
             RoundButton(Icons.Rounded.ViewSidebar, "Show sessions", onClick = onShowSidebar)
         }
         RoundButton(Icons.Rounded.GridView, "All windows", onClick = onOverview)
-        ActionsMenu(controller, view, window, onArrange, onMessage, filled = true, onOpenPalette = onOpenPalette)
+        ActionsMenu(controller, view, window, onArrange, onMessage, filled = true, onOpenPalette = onOpenPalette, onOpenDetached = onOpenDetached)
         // With the tab strip hidden, Compose lives here instead.
         AnimatedVisibility(!sidebarHidden, enter = scale, exit = shrink) {
             RoundButton(Icons.Rounded.EditNote, "Compose", onClick = onOpenComposer)
@@ -497,8 +604,12 @@ private fun ActionsMenu(
     onMessage: (String) -> Unit,
     filled: Boolean,
     onOpenPalette: () -> Unit,
+    onOpenDetached: () -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
+    val detached by controller.connection.detached.collectAsStateWithLifecycle()
+    val detachedCount = detached[controller.sessionId]?.size ?: 0
+    val portrait = LocalConfiguration.current.orientation != Configuration.ORIENTATION_LANDSCAPE
     var rename by remember { mutableStateOf<RenameTarget?>(null) }
     var confirmEnd by remember { mutableStateOf(false) }
     val connection = controller.connection
@@ -549,7 +660,8 @@ private fun ActionsMenu(
             )
             DropdownMenuItem(
                 text = { Text("Arrange panes") },
-                enabled = paneCount > 1,
+                // Arranging only moves panes in the layout, not floating ones.
+                enabled = (window?.tiledLayer?.blocks?.size ?: 0) > 1,
                 onClick = {
                     open = false
                     onArrange()
@@ -563,6 +675,63 @@ private fun ActionsMenu(
                     focused?.let { connection.closeBlock(sessionId, it, onMessage) }
                 },
             )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            val focusedLayer = focused?.let { window?.layerOf(it) }
+            val dockAnchor = window?.tiledLayer?.blocks?.firstOrNull()?.id
+            DropdownMenuItem(
+                text = { Text("New floating pane") },
+                enabled = window != null,
+                onClick = {
+                    open = false
+                    window?.let { connection.newFloatingPane(sessionId, it.id, nextFloatBounds(it), onMessage) }
+                },
+            )
+            if (focusedLayer?.floating == true) {
+                DropdownMenuItem(
+                    text = { Text("Dock pane") },
+                    enabled = dockAnchor != null,
+                    onClick = {
+                        open = false
+                        if (focused != null && dockAnchor != null) {
+                            connection.moveBlock(sessionId, focused, dockAnchor, horizontal = !portrait, before = false, onError = onMessage)
+                        }
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Minimize pane") },
+                    onClick = {
+                        open = false
+                        connection.setLayerMinimized(sessionId, focusedLayer.id, true, onMessage)
+                    },
+                )
+            } else {
+                DropdownMenuItem(
+                    text = { Text("Float pane") },
+                    // With no pane left in the layout, a floating one would have nowhere to dock.
+                    enabled = focused != null && (window?.tiledLayer?.blocks?.size ?: 0) > 1,
+                    onClick = {
+                        open = false
+                        if (focused != null && window != null) connection.floatBlock(sessionId, focused, nextFloatBounds(window), onMessage)
+                    },
+                )
+            }
+            DropdownMenuItem(
+                text = { Text("Detach pane") },
+                enabled = focused != null,
+                onClick = {
+                    open = false
+                    focused?.let { connection.detachBlock(sessionId, it, onMessage) }
+                },
+            )
+            if (detachedCount > 0) {
+                DropdownMenuItem(
+                    text = { Text("Detached panes ($detachedCount)") },
+                    onClick = {
+                        open = false
+                        onOpenDetached()
+                    },
+                )
+            }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             DropdownMenuItem(
                 text = { Text("Keep other device's size") },
@@ -721,6 +890,162 @@ private fun WindowPills(controller: WorkspaceController, view: SessionView, onMe
     }
 }
 
+/** Floating panes that are minimized. Tap one to bring it back, or hold it for more. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun MinimizedTray(controller: WorkspaceController, layers: List<LayerView>, onMessage: (String) -> Unit) {
+    val connection = controller.connection
+    val sessionId = controller.sessionId
+    val statuses by connection.statuses.collectAsStateWithLifecycle()
+    val attention by connection.attention.collectAsStateWithLifecycle()
+    val titles by connection.titles.collectAsStateWithLifecycle()
+    val programs by connection.programs.collectAsStateWithLifecycle()
+    val scheme = MaterialTheme.colorScheme
+    var menuFor by remember { mutableStateOf<String?>(null) }
+    var closing by remember { mutableStateOf<String?>(null) }
+    LazyRow(
+        Modifier.fillMaxWidth().padding(top = 6.dp),
+        contentPadding = PaddingValues(horizontal = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        items(layers, key = { it.id }) { layer ->
+            val shown = layer.asWindow()
+            Box(Modifier.animateItem()) {
+                Row(
+                    Modifier
+                        .clip(CircleShape)
+                        .background(scheme.surfaceContainerHigh)
+                        .combinedClickable(
+                            onClick = { connection.setLayerMinimized(sessionId, layer.id, false, onMessage) },
+                            onLongClick = { menuFor = layer.id },
+                        )
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    WindowTile(shown, statuses, programs, attention, size = 20.dp)
+                    Text(
+                        shown.displayTitle(titles),
+                        Modifier.padding(start = 7.dp, end = 4.dp).widthIn(max = 140.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                DropdownMenu(menuFor == layer.id, onDismissRequest = { menuFor = null }) {
+                    DropdownMenuItem(text = { Text("Restore") }, onClick = {
+                        menuFor = null
+                        connection.setLayerMinimized(sessionId, layer.id, false, onMessage)
+                    })
+                    DropdownMenuItem(text = { Text("Close") }, onClick = {
+                        menuFor = null
+                        closing = layer.id
+                    })
+                }
+            }
+        }
+    }
+    closing?.let { layer ->
+        AlertDialog(
+            onDismissRequest = { closing = null },
+            title = { Text("Close this floating pane?") },
+            text = { Text("This stops the program running in it.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    closing = null
+                    connection.closeLayer(sessionId, layer, onMessage)
+                }) { Text("Close") }
+            },
+            dismissButton = { TextButton(onClick = { closing = null }) { Text("Cancel") } },
+        )
+    }
+}
+
+/** Panes still running outside every window, with live previews and ways to bring them back. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DetachedSheet(controller: WorkspaceController, window: WindowView?, onClose: () -> Unit, onMessage: (String) -> Unit) {
+    val connection = controller.connection
+    val sessionId = controller.sessionId
+    val detached by connection.detached.collectAsStateWithLifecycle()
+    val statuses by connection.statuses.collectAsStateWithLifecycle()
+    val attention by connection.attention.collectAsStateWithLifecycle()
+    val titles by connection.titles.collectAsStateWithLifecycle()
+    val programs by connection.programs.collectAsStateWithLifecycle()
+    val blocks = detached[sessionId].orEmpty()
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    var closing by remember { mutableStateOf<BlockInfo?>(null) }
+    val anchor = controller.focusedBlockId ?: window?.shownBlocks?.firstOrNull()?.id
+    val portrait = LocalConfiguration.current.orientation != Configuration.ORIENTATION_LANDSCAPE
+    LaunchedEffect(Unit) { connection.refreshDetached(sessionId) }
+    ModalBottomSheet(onDismissRequest = onClose) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 16.dp)) {
+            Text("Detached panes", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "These keep running, but aren't in any window.",
+                Modifier.padding(top = 2.dp, bottom = 12.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = muted,
+            )
+            if (blocks.isEmpty()) {
+                Text(
+                    "Nothing is detached in this session.",
+                    Modifier.padding(vertical = 24.dp).align(Alignment.CenterHorizontally),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = muted,
+                )
+            }
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                items(blocks, key = { it.id }) { block ->
+                    val shown = block.asWindow()
+                    Column(Modifier.animateItem()) {
+                        TerminalPreview(
+                            controller, block.id,
+                            Modifier.fillMaxWidth().aspectRatio(2f).clip(RoundedCornerShape(14.dp)),
+                        )
+                        Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            WindowTile(shown, statuses, programs, attention, size = 22.dp)
+                            Text(
+                                statuses[block.id]?.message ?: shown.displayTitle(titles),
+                                Modifier.padding(start = 8.dp).weight(1f),
+                                style = MaterialTheme.typography.labelLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            TextButton(onClick = { closing = block }) {
+                                Text("Close", color = MaterialTheme.colorScheme.error)
+                            }
+                            TextButton(enabled = anchor != null, onClick = {
+                                if (anchor != null) connection.moveBlock(sessionId, block.id, anchor, horizontal = !portrait, before = false, onError = onMessage)
+                                onClose()
+                            }) { Text("Split here") }
+                            TextButton(onClick = {
+                                connection.placeInNewWindow(sessionId, block.id, onMessage)
+                                onClose()
+                            }) { Text("New window") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    closing?.let { block ->
+        AlertDialog(
+            onDismissRequest = { closing = null },
+            title = { Text("Close this pane?") },
+            text = { Text("This stops the program running in it.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    closing = null
+                    connection.closeBlock(sessionId, block.id, onMessage)
+                }) { Text("Close") }
+            },
+            dismissButton = { TextButton(onClick = { closing = null }) { Text("Cancel") } },
+        )
+    }
+}
+
 /** A pop-up editor with normal keyboard features, for long prompts and voice typing. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -734,7 +1059,8 @@ private fun ComposerSheet(controller: WorkspaceController, sendsEnter: Boolean, 
             OutlinedTextField(
                 value = text,
                 onValueChange = { text = it },
-                modifier = Modifier.fillMaxWidth().heightIn(min = 140.dp).focusRequester(focus),
+                // Long text scrolls inside the field, so Send stays on screen.
+                modifier = Modifier.fillMaxWidth().weight(1f, fill = false).heightIn(min = 140.dp).focusRequester(focus),
                 label = { Text("Message for this pane") },
             )
             Spacer(Modifier.size(8.dp))
