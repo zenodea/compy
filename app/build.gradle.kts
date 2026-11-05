@@ -45,7 +45,7 @@ android {
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
-            resValue("string", "app_name", "Compy Debug")
+            resValue("string", "app_name", "Compy")
             buildConfigField("boolean", "ALLOW_CLEARTEXT", "true")
         }
         release {
@@ -62,7 +62,7 @@ android {
             applicationIdSuffix = ".qa"
             signingConfig = signingConfigs.getByName("debug")
             matchingFallbacks += "release"
-            resValue("string", "app_name", "Compy QA")
+            resValue("string", "app_name", "Compy")
             buildConfigField("boolean", "ALLOW_CLEARTEXT", "true")
         }
     }

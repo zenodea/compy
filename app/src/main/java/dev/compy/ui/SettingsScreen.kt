@@ -15,7 +15,9 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -25,6 +27,9 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -64,6 +69,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.app.NotificationManagerCompat
 import dev.compy.AppState
+import dev.compy.system.AppIcon
+import dev.compy.system.AppIcons
 import dev.compy.system.batteryExemptionIntent
 import dev.compy.system.isIgnoringBatteryOptimizations
 import dev.compy.system.notificationSettingsIntent
@@ -151,6 +158,67 @@ private fun Segments(options: List<Pair<String, String>>, selected: String, onSe
     }
 }
 
+/** Each icon as it looks on a home screen, to choose which one the launcher shows. */
+@Composable
+private fun AppIconPicker() {
+    val context = LocalContext.current
+    var current by remember { mutableStateOf(AppIcons.current(context)) }
+    val scheme = MaterialTheme.colorScheme
+    Column(Modifier.padding(horizontal = 12.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        AppIcon.entries.chunked(3).forEach { row ->
+            Row(Modifier.fillMaxWidth()) {
+                row.forEach { icon ->
+                    val selected = icon == current
+                    val shape = RoundedCornerShape(18.dp)
+                    Column(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable {
+                                AppIcons.choose(icon)
+                                current = icon
+                            }
+                            .padding(vertical = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Box(
+                            Modifier
+                                .size(68.dp)
+                                .border(2.dp, if (selected) scheme.primary else Color.Transparent, RoundedCornerShape(22.dp))
+                                .padding(5.dp)
+                                .clip(shape),
+                        ) {
+                            // These layers are drawn for a launcher, which shows only their middle two thirds.
+                            listOf(icon.background, icon.foreground).forEach { layer ->
+                                Image(
+                                    painterResource(layer), null,
+                                    Modifier.fillMaxSize().graphicsLayer {
+                                        scaleX = 1.5f
+                                        scaleY = 1.5f
+                                    },
+                                )
+                            }
+                        }
+                        Text(
+                            icon.label,
+                            Modifier.padding(top = 4.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (selected) scheme.primary else scheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
+            }
+        }
+        Text(
+            "The icon changes when you leave Compy, and your launcher can take a few seconds to update. An icon you placed on the home screen may need adding again.",
+            Modifier.padding(horizontal = 6.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = scheme.onSurfaceVariant,
+        )
+    }
+}
+
 @Composable
 private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> Unit) {
     val settings by app.settings.collectAsStateWithLifecycle()
@@ -192,6 +260,7 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
                 }
             }
             item {
+                Group("App icon") { AppIconPicker() }
                 Group("Notifications") {
                     val notificationsAllowed = NotificationManagerCompat.from(context).areNotificationsEnabled()
                     SwitchRow(

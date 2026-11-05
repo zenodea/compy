@@ -16,6 +16,7 @@ import dev.compy.data.SettingsStore
 import dev.compy.rex.ConnectionState
 import dev.compy.rex.ServerConfig
 import dev.compy.system.AlertNotifier
+import dev.compy.system.AppIcons
 import dev.compy.system.Shortcuts
 import dev.compy.system.StatusPublisher
 import dev.compy.system.WatchService
@@ -327,6 +328,7 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
     override fun onStop(owner: LifecycleOwner) {
         _foreground.value = false
         leftAt = System.currentTimeMillis()
+        AppIcons.applyChoice(context)
         // Give terminal sizes back straight away so other devices reflow, but keep the sockets for
         // a moment, because switching apps briefly is common.
         pauseJob = scope.launch {

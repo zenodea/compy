@@ -25,7 +25,7 @@ In Compy, tap **Scan pairing code** and scan what it shows, or type the `ts.net`
 - **Notifications:** Compy can stay connected in the background and alert you when an agent needs you, finishes or fails. Open the pane from the notification, or reply to it directly.
 - **Status:** progress rings, the current folder under each window, and a haptic on the terminal bell.
 - **Input:** direct typing, a customizable key bar, a composer with voice typing, and hardware keyboard and mouse support.
-- **Look:** the whole app takes its colors from the Rex host's terminal theme, or from your wallpaper if you prefer.
+- **Look:** the whole app takes its colors from the Rex host's terminal theme, or from your wallpaper if you prefer. Choose from six app icons in Settings.
 - **Android:** predictive back, a share target for text, app shortcuts, a home screen widget and a Quick Settings tile.
 - **Privacy:** no telemetry. Biometric lock is on when the device supports it, and screenshot blocking is optional.
 
