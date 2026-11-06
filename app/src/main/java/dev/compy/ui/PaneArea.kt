@@ -10,6 +10,7 @@ import androidx.compose.animation.core.TwoWayConverter
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -51,6 +52,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,6 +72,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
@@ -175,17 +178,14 @@ fun PaneArea(
                     inset = inset,
                     dimmed = blockId == lifted,
                 ) {
-                    Box(Modifier.fillMaxSize()) {
-                        TerminalPane(
-                            controller = controller,
-                            blockId = blockId,
-                            focused = blockId == controller.focusedBlockId,
-                            showFocusRing = multiple,
-                            interactive = !arranging && enabled && visible,
-                            onTapped = { onPaneTapped(blockId) },
-                        )
-                        if (lift != null) PaneGrip(blockId, multiple && !arranging && enabled, lift)
-                    }
+                    TerminalPane(
+                        controller = controller,
+                        blockId = blockId,
+                        focused = blockId == controller.focusedBlockId,
+                        showFocusRing = multiple,
+                        interactive = !arranging && enabled && visible,
+                        onTapped = { onPaneTapped(blockId) },
+                    )
                 }
             }
         }
@@ -241,7 +241,16 @@ fun PaneArea(
                     if (ratio == null || kotlin.math.abs(ratio - (overrides[id] ?: ratio)) < 0.01f) overrides.remove(id)
                 }
             }
-        } else if (arranging) {
+        }
+        // After the dividers, so a grip wins where the two meet. Floating panes still cover it.
+        if (lift != null) {
+            panes.forEach { (blockId, rect) ->
+                key("grip", blockId) {
+                    PaneGrip(blockId, rect, shown = multiple && !arranging && enabled, snap = dragging, inset = inset, lift = lift)
+                }
+            }
+        }
+        if (arranging) {
             BoxWithConstraints(Modifier.fillMaxSize()) {
                 ArrangeOverlay(panes, maxWidth, maxHeight, onDrop)
             }
@@ -497,13 +506,27 @@ interface PaneLift {
 }
 
 /**
- * The handle on a pane's top edge. Dragging it carries the pane to another place in the window.
- * A long press inside the pane selects text and the line between panes resizes them, so the pane
- * gets its own small handle instead.
+ * The handle on a pane's right edge. Dragging it carries the pane to another place in the window.
+ * A long press inside the pane selects text and the lines between panes resize them, so the pane
+ * gets its own small handle. It sits above the dividers and away from their middle, so it never
+ * fights them for a touch.
  */
 @Composable
-private fun BoxScope.PaneGrip(blockId: String, shown: Boolean, lift: PaneLift) {
+private fun PaneGrip(
+    blockId: String,
+    target: FractionRect,
+    shown: Boolean,
+    snap: Boolean,
+    inset: State<Dp>,
+    lift: PaneLift,
+) {
     val latest = rememberUpdated(lift)
+    // Glides with its pane, using the same motion.
+    val spec: AnimationSpec<Float> = if (snap) snap() else motion()
+    val x = animateFloatAsState(target.x, spec, label = "grip-x")
+    val y = animateFloatAsState(target.y, spec, label = "grip-y")
+    val w = animateFloatAsState(target.w, spec, label = "grip-w")
+    val h = animateFloatAsState(target.h, spec, label = "grip-h")
     // Kept outside of state, so a pane gliding around never recomposes its grip.
     val coords = remember { arrayOfNulls<LayoutCoordinates>(1) }
     var active by remember { mutableStateOf(false) }
@@ -516,11 +539,24 @@ private fun BoxScope.PaneGrip(blockId: String, shown: Boolean, lift: PaneLift) {
         motion(MOTION_SHORT),
         label = "grip",
     )
+    val length by animateDpAsState(if (active) 44.dp else 34.dp, motion(MOTION_SHORT), label = "grip-length")
     if (!shown && alpha == 0f) return
     Box(
         Modifier
-            .align(Alignment.TopCenter)
-            .size(72.dp, 24.dp)
+            .layout { measurable, constraints ->
+                val i = inset.value.roundToPx()
+                val parentW = constraints.maxWidth
+                val parentH = constraints.maxHeight
+                val right = (parentW * (x.value + w.value)).roundToInt() - i
+                val top = (parentH * y.value).roundToInt() + i
+                val height = (parentH * (y.value + h.value)).roundToInt() - i - top
+                val boxW = 28.dp.roundToPx()
+                val boxH = minOf(72.dp.roundToPx(), height).coerceAtLeast(1)
+                // A third of the way down: clear of the divider handles, which sit in the middle.
+                val center = if (height < 180.dp.roundToPx()) height / 2 else maxOf(56.dp.roundToPx(), height / 3)
+                val placeable = measurable.measure(Constraints.fixed(boxW, boxH))
+                layout(parentW, parentH) { placeable.place(right - boxW, top + center - boxH / 2) }
+            }
             .onGloballyPositioned { coords[0] = it }
             .pointerInput(blockId, shown) {
                 if (!shown) return@pointerInput
@@ -554,9 +590,9 @@ private fun BoxScope.PaneGrip(blockId: String, shown: Boolean, lift: PaneLift) {
     ) {
         Box(
             Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = 6.dp)
-                .size(if (active) 40.dp else 32.dp, 4.dp)
+                .align(Alignment.CenterEnd)
+                .padding(end = 6.dp)
+                .size(4.dp, length)
                 .graphicsLayer { this.alpha = alpha }
                 .clip(CircleShape)
                 .background(MaterialTheme.colorScheme.onSurface),
@@ -697,6 +733,12 @@ class PaneSpawn {
     var armed by mutableStateOf(false)
     /** The pane being carried by its grip, or null while a new pane is being placed. */
     var moving by mutableStateOf<String?>(null)
+    /** True while a carried pane hovers over the chest that closes it. */
+    var overChest by mutableStateOf(false)
+    /** True once a pane has been dropped into the chest, until the next one is lifted. */
+    var dropped by mutableStateOf(false)
+    /** Counts panes dropped into the chest, so each drop plays its animation. */
+    var swallowed by mutableIntStateOf(0)
 }
 
 /** Where a dragged mini window would land. With no anchor, the window has no panes to split. */
@@ -757,7 +799,8 @@ fun PaneSpawnOverlay(spawn: PaneSpawn, drop: SpawnDrop?, area: Rect?, modifier: 
         }
         wasShown = rect != null
     }
-    Box(modifier.fillMaxSize()) {
+    val overlayWidth = remember { floatArrayOf(0f) }
+    Box(modifier.fillMaxSize().onSizeChanged { overlayWidth[0] = it.width.toFloat() }) {
         if (area != null && fade > 0f) {
             Box(
                 Modifier
@@ -783,9 +826,13 @@ fun PaneSpawnOverlay(spawn: PaneSpawn, drop: SpawnDrop?, area: Rect?, modifier: 
                 }
             }
         }
+        if (area != null) PaneChest(spawn, area)
         val visible = remember { MutableTransitionState(false) }
         visible.targetState = spawn.pointer != null
         val last = remember { floatArrayOf(0f, 0f) }
+        // Over the chest the card shrinks a little and hops over its open lid, about to fall in.
+        val shrink by animateFloatAsState(if (spawn.overChest) 0.72f else 1f, spring(dampingRatio = 0.55f, stiffness = 500f), label = "card-shrink")
+        val pull = animateFloatAsState(if (spawn.overChest || spawn.dropped) 1f else 0f, spring(dampingRatio = 0.6f, stiffness = 420f), label = "card-pull")
         AnimatedVisibility(
             visible,
             Modifier.offset {
@@ -794,13 +841,34 @@ fun PaneSpawnOverlay(spawn: PaneSpawn, drop: SpawnDrop?, area: Rect?, modifier: 
                     last[1] = it.y
                 }
                 // Held above the finger, so the finger doesn't hide it.
-                IntOffset(last[0].roundToInt() - 44.dp.roundToPx(), last[1].roundToInt() - 92.dp.roundToPx())
+                var x = last[0] - 44.dp.toPx()
+                var y = last[1] - 92.dp.toPx()
+                val chest = area?.let { chestRect(it, this) }
+                if (chest != null && pull.value > 0f) {
+                    x += (chest.center.x - 44.dp.toPx() - x) * pull.value
+                    y += (chest.top - 50.dp.toPx() - y) * pull.value
+                }
+                // Kept on screen, even when the finger is right at the edge.
+                val edge = 8.dp.toPx()
+                x = x.coerceIn(edge, maxOf(edge, overlayWidth[0] - 88.dp.toPx() - edge))
+                IntOffset(x.roundToInt(), y.roundToInt())
             },
             enter = fadeIn(motion(MOTION_SHORT)) + scaleIn(motion(MOTION_SHORT), initialScale = 0.6f),
-            exit = fadeOut(motion(MOTION_SHORT)) + scaleOut(motion(MOTION_SHORT), targetScale = 0.6f),
+            // Dropped in the chest, it falls in and vanishes instead of just fading.
+            exit = if (spawn.dropped) {
+                fadeOut(motion(MOTION_SHORT)) + scaleOut(motion(MOTION_SHORT), targetScale = 0f, transformOrigin = TransformOrigin(0.5f, 1f)) +
+                    androidx.compose.animation.slideOutVertically(motion(MOTION_SHORT)) { it }
+            } else {
+                fadeOut(motion(MOTION_SHORT)) + scaleOut(motion(MOTION_SHORT), targetScale = 0.6f)
+            },
         ) {
             Box(
                 Modifier
+                    .graphicsLayer {
+                        scaleX = shrink
+                        scaleY = shrink
+                        transformOrigin = TransformOrigin(0.5f, 1f)
+                    }
                     .size(88.dp, 60.dp)
                     .shadow(8.dp, shape)
                     .clip(shape)
