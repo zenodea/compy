@@ -230,16 +230,16 @@ fun Workspace(
         val fx = (point.x - area.left) / area.width
         val fy = (point.y - area.top) / area.height
         val moving = spawn.moving
-        if (moving != null && overChest(area, latestDensity.value, point)) return null
+        if (moving != null && overTrash(area, latestDensity.value, point)) return null
         return if (moving != null) moveDrop(shown, fx, fy, moving) else spawnDrop(shown, fx, fy)
     }
-    fun pointOverChest(point: Offset?): Boolean {
+    fun pointOverTrash(point: Offset?): Boolean {
         val area = latestArea.value ?: return false
-        return point != null && overChest(area, latestDensity.value, point)
+        return point != null && overTrash(area, latestDensity.value, point)
     }
     val latestConnection = rememberUpdated(connection)
-    LaunchedEffect(spawn.overChest) {
-        if (spawn.overChest) rootView.performHapticFeedback(HapticFeedbackConstants.SEGMENT_TICK)
+    LaunchedEffect(spawn.overTrash) {
+        if (spawn.overTrash) rootView.performHapticFeedback(HapticFeedbackConstants.SEGMENT_TICK)
     }
     val latestMessage = rememberUpdated(onMessage)
     val paneLift = remember(spawn) {
@@ -247,7 +247,7 @@ fun Workspace(
             override fun lift(blockId: String, at: Offset) {
                 spawn.moving = blockId
                 spawn.armed = false
-                spawn.overChest = false
+                spawn.overTrash = false
                 spawn.dropped = false
                 spawn.pointer = at - origin
                 rootView.performHapticFeedback(HapticFeedbackConstants.GESTURE_START)
@@ -256,27 +256,27 @@ fun Workspace(
             override fun move(at: Offset, armed: Boolean) {
                 spawn.armed = armed
                 spawn.pointer = at - origin
-                spawn.overChest = armed && pointOverChest(spawn.pointer)
+                spawn.overTrash = armed && pointOverTrash(spawn.pointer)
             }
 
             override fun release(place: Boolean) {
                 val moving = spawn.moving
                 val placing = place && spawn.armed
-                val intoChest = placing && moving != null && pointOverChest(spawn.pointer)
-                val drop = if (placing && !intoChest) dropAt(spawn.pointer) else null
-                // Set before the card disappears, so it falls into the chest instead of fading.
-                if (intoChest) {
+                val intoTrash = placing && moving != null && pointOverTrash(spawn.pointer)
+                val drop = if (placing && !intoTrash) dropAt(spawn.pointer) else null
+                // Set before the card disappears, so it falls into the trash instead of fading.
+                if (intoTrash) {
                     spawn.dropped = true
                     spawn.swallowed++
                 }
-                spawn.overChest = false
+                spawn.overTrash = false
                 spawn.pointer = null
                 spawn.armed = false
                 spawn.moving = null
                 val c = latestConnection.value
                 val error = latestMessage.value
-                if (intoChest && moving != null) {
-                    // No confirmation: the chest itself is the deliberate gesture.
+                if (intoTrash && moving != null) {
+                    // No confirmation: dragging into the trash is the deliberate gesture.
                     c.closeBlock(sessionId, moving, error)
                     rootView.performHapticFeedback(HapticFeedbackConstants.REJECT)
                     return

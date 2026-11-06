@@ -98,7 +98,8 @@ import kotlin.math.roundToInt
 /** How panes are drawn: rounded with gaps, or packed edge to edge with thin lines like tmux. */
 data class PaneLook(val shape: Shape, val gap: Dp, val tight: Boolean)
 
-val RelaxedPanes = PaneLook(RoundedCornerShape(18.dp), 6.dp, tight = false)
+private val CornerRadiusDp = 18.dp
+val RelaxedPanes = PaneLook(RoundedCornerShape(CornerRadiusDp), 6.dp, tight = false)
 val TightPanes = PaneLook(RectangleShape, 1.dp, tight = true)
 val LocalPaneLook = staticCompositionLocalOf { RelaxedPanes }
 
@@ -106,7 +107,7 @@ val LocalPaneLook = staticCompositionLocalOf { RelaxedPanes }
 private val PaneLook.handleInset: Dp get() = if (tight) 3.dp else 6.dp
 
 /** Extra room above a pane's text, so its first line starts just below the drag handle. */
-private val PaneLook.handleSpace: Dp get() = handleInset + 11.dp
+private val PaneLook.handleSpace: Dp get() = if (tight) handleInset + 11.dp else 9.dp
 
 private data class PlacedSplit(
     val split: LayoutNode.Split,
@@ -557,7 +558,9 @@ private fun PaneGrip(
         motion(MOTION_SHORT),
         label = "grip",
     )
-    val handleInset = LocalPaneLook.current.handleInset
+    val look = LocalPaneLook.current
+    val handleInset = look.handleInset
+    val ink = MaterialTheme.colorScheme.onSurface
     val grow by animateFloatAsState(if (active) 1.2f else 1f, spring(dampingRatio = 0.5f, stiffness = 600f), label = "grip-grow")
     if (!shown && alpha == 0f) return
     Box(
@@ -604,20 +607,39 @@ private fun PaneGrip(
                 }
             },
     ) {
-        androidx.compose.material3.Icon(
-            Icons.Rounded.DragIndicator,
-            "Move pane",
-            Modifier
-                .align(Alignment.TopStart)
-                .padding(start = handleInset, top = handleInset)
-                .size(18.dp)
-                .graphicsLayer {
-                    this.alpha = alpha
-                    scaleX = grow
-                    scaleY = grow
-                },
-            tint = MaterialTheme.colorScheme.onSurface,
-        )
+        if (look.tight) {
+            androidx.compose.material3.Icon(
+                Icons.Rounded.DragIndicator,
+                "Move pane",
+                Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = handleInset, top = handleInset)
+                    .size(18.dp)
+                    .graphicsLayer {
+                        this.alpha = alpha
+                        scaleX = grow
+                        scaleY = grow
+                    },
+                tint = ink,
+            )
+        } else {
+            // Two short arcs that follow the pane's rounded corner, like grip lines on its edge.
+            androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+                val corner = CornerRadiusDp.toPx()
+                val width = 2.4.dp.toPx() * grow
+                for (r in listOf(corner - 5.5.dp.toPx(), corner - 10.dp.toPx())) {
+                    drawArc(
+                        ink.copy(alpha = alpha),
+                        startAngle = 192f,
+                        sweepAngle = 66f,
+                        useCenter = false,
+                        topLeft = Offset(corner - r, corner - r),
+                        size = androidx.compose.ui.geometry.Size(r * 2, r * 2),
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(width, cap = StrokeCap.Round),
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -754,11 +776,11 @@ class PaneSpawn {
     var armed by mutableStateOf(false)
     /** The pane being carried by its grip, or null while a new pane is being placed. */
     var moving by mutableStateOf<String?>(null)
-    /** True while a carried pane hovers over the chest that closes it. */
-    var overChest by mutableStateOf(false)
-    /** True once a pane has been dropped into the chest, until the next one is lifted. */
+    /** True while a carried pane hovers over the trash can that closes it. */
+    var overTrash by mutableStateOf(false)
+    /** True once a pane has been dropped into the trash, until the next one is lifted. */
     var dropped by mutableStateOf(false)
-    /** Counts panes dropped into the chest, so each drop plays its animation. */
+    /** Counts panes dropped into the trash, so each drop plays its animation. */
     var swallowed by mutableIntStateOf(0)
 }
 
@@ -848,13 +870,13 @@ fun PaneSpawnOverlay(spawn: PaneSpawn, drop: SpawnDrop?, area: Rect?, modifier: 
                 }
             }
         }
-        if (area != null) PaneChest(spawn, area)
+        if (area != null) PaneTrash(spawn, area)
         val visible = remember { MutableTransitionState(false) }
         visible.targetState = spawn.pointer != null
         val last = remember { floatArrayOf(0f, 0f) }
-        // Over the chest the card shrinks a little and hops over its open lid, about to fall in.
-        val shrink by animateFloatAsState(if (spawn.overChest) 0.72f else 1f, spring(dampingRatio = 0.55f, stiffness = 500f), label = "card-shrink")
-        val pull = animateFloatAsState(if (spawn.overChest || spawn.dropped) 1f else 0f, spring(dampingRatio = 0.6f, stiffness = 420f), label = "card-pull")
+        // Over the trash the card shrinks a little and hovers above its open lid, about to fall in.
+        val shrink by animateFloatAsState(if (spawn.overTrash) 0.72f else 1f, spring(dampingRatio = 0.55f, stiffness = 500f), label = "card-shrink")
+        val pull = animateFloatAsState(if (spawn.overTrash || spawn.dropped) 1f else 0f, spring(dampingRatio = 0.6f, stiffness = 420f), label = "card-pull")
         AnimatedVisibility(
             visible,
             Modifier.offset {
@@ -865,10 +887,11 @@ fun PaneSpawnOverlay(spawn: PaneSpawn, drop: SpawnDrop?, area: Rect?, modifier: 
                 // Held above the finger, so the finger doesn't hide it.
                 var x = last[0] - 44.dp.toPx()
                 var y = last[1] - 92.dp.toPx()
-                val chest = area?.let { chestRect(it, this) }
-                if (chest != null && pull.value > 0f) {
-                    x += (chest.center.x - 44.dp.toPx() - x) * pull.value
-                    y += (chest.top - 50.dp.toPx() - y) * pull.value
+                val bin = area?.let { trashRect(it, this) }
+                if (bin != null && pull.value > 0f) {
+                    x += (bin.center.x - 44.dp.toPx() - x) * pull.value
+                    // High enough that the lid flipping open stays in view.
+                    y += (bin.top - 78.dp.toPx() - y) * pull.value
                 }
                 // Kept on screen, even when the finger is right at the edge.
                 val edge = 8.dp.toPx()
@@ -876,7 +899,7 @@ fun PaneSpawnOverlay(spawn: PaneSpawn, drop: SpawnDrop?, area: Rect?, modifier: 
                 IntOffset(x.roundToInt(), y.roundToInt())
             },
             enter = fadeIn(motion(MOTION_SHORT)) + scaleIn(motion(MOTION_SHORT), initialScale = 0.6f),
-            // Dropped in the chest, it falls in and vanishes instead of just fading.
+            // Dropped in the trash, it falls in and vanishes instead of just fading.
             exit = if (spawn.dropped) {
                 fadeOut(motion(MOTION_SHORT)) + scaleOut(motion(MOTION_SHORT), targetScale = 0f, transformOrigin = TransformOrigin(0.5f, 1f)) +
                     androidx.compose.animation.slideOutVertically(motion(MOTION_SHORT)) { it }
