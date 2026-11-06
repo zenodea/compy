@@ -50,6 +50,8 @@ data class Settings(
     val themeMode: String = "system",
     val dynamicColor: Boolean = true,
     val amoled: Boolean = false,
+    /** "relaxed" draws rounded panes with gaps; "tight" packs them edge to edge like tmux. Only Compy sees this. */
+    val paneLayout: String = "relaxed",
     val terminalTheme: String = "rex",
     val fontSizeSp: Float = 13f,
     val customFontPath: String? = null,

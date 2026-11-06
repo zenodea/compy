@@ -34,6 +34,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
@@ -91,8 +94,12 @@ import dev.compy.rex.WindowView
 import dev.compy.term.TerminalView
 import kotlin.math.roundToInt
 
-private val PaneShape = RoundedCornerShape(18.dp)
-private val Gap = 6.dp
+/** How panes are drawn: rounded with gaps, or packed edge to edge with thin lines like tmux. */
+data class PaneLook(val shape: Shape, val gap: Dp, val tight: Boolean)
+
+val RelaxedPanes = PaneLook(RoundedCornerShape(18.dp), 6.dp, tight = false)
+val TightPanes = PaneLook(RectangleShape, 1.dp, tight = true)
+val LocalPaneLook = staticCompositionLocalOf { RelaxedPanes }
 
 private data class PlacedSplit(
     val split: LayoutNode.Split,
@@ -163,7 +170,12 @@ fun PaneArea(
         val multiple = zoomed == null && panes.size > 1
         val dragging = overrides.isNotEmpty()
         val firstLayout = known.isEmpty()
-        val inset = animateDpAsState(if (multiple) Gap / 2 else 0.dp, motion(), label = "inset")
+        val look = LocalPaneLook.current
+        val inset = animateDpAsState(if (multiple) look.gap / 2 else 0.dp, motion(), label = "inset")
+        // Tight panes sit on a line-colored backing, so the hairline gaps between them read as lines.
+        if (look.tight && multiple) {
+            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.outlineVariant))
+        }
         panes.forEach { (blockId, rect) ->
             key(blockId) {
                 val isNew = !firstLayout && blockId !in known
@@ -347,10 +359,10 @@ private fun FloatingLayer(
             Column(
                 Modifier
                     .fillMaxSize()
-                    .shadow(10.dp, PaneShape)
-                    .clip(PaneShape)
+                    .shadow(10.dp, LocalPaneLook.current.shape)
+                    .clip(LocalPaneLook.current.shape)
                     .background(scheme.surfaceContainerHigh)
-                    .border(1.dp, ring, PaneShape),
+                    .border(1.dp, ring, LocalPaneLook.current.shape),
             ) {
                 Row(
                     Modifier
@@ -785,6 +797,7 @@ internal fun moveDrop(window: WindowView, fx: Float, fy: Float, moving: String):
 /** The mini window under the finger and the highlight showing where it would land. */
 @Composable
 fun PaneSpawnOverlay(spawn: PaneSpawn, drop: SpawnDrop?, area: Rect?, modifier: Modifier = Modifier) {
+    val halfGap = LocalPaneLook.current.gap / 2
     val scheme = MaterialTheme.colorScheme
     val shape = RoundedCornerShape(12.dp)
     val density = LocalDensity.current
@@ -809,11 +822,11 @@ fun PaneSpawnOverlay(spawn: PaneSpawn, drop: SpawnDrop?, area: Rect?, modifier: 
             ) {
                 Box(
                     Modifier
-                        .fractionalPane({ highlight.value }, { Gap / 2 })
+                        .fractionalPane({ highlight.value }, { halfGap })
                         .graphicsLayer { alpha = fade }
-                        .clip(PaneShape)
+                        .clip(LocalPaneLook.current.shape)
                         .background(scheme.primary.copy(alpha = 0.3f))
-                        .border(2.dp, scheme.primary, PaneShape),
+                        .border(2.dp, scheme.primary, LocalPaneLook.current.shape),
                     contentAlignment = Alignment.Center,
                 ) {
                     AnimatedVisibility(
@@ -948,10 +961,10 @@ private fun BoxScope.ArrangeOverlay(
         val fy = (pointer.y / heightPx - r.y) / r.h
         val highlight = zoneRect(r, zoneFor(fx, fy))
         Box(
-            paneModifier(highlight, fullW, fullH, Gap / 2)
-                .clip(PaneShape)
+            paneModifier(highlight, fullW, fullH, LocalPaneLook.current.gap / 2)
+                .clip(LocalPaneLook.current.shape)
                 .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
-                .border(2.dp, MaterialTheme.colorScheme.primary, PaneShape),
+                .border(2.dp, MaterialTheme.colorScheme.primary, LocalPaneLook.current.shape),
         )
     }
     val d = dragged
@@ -971,9 +984,9 @@ private fun BoxScope.ArrangeOverlay(
                     scaleY = 0.6f
                     alpha = 0.85f
                 }
-                .clip(PaneShape)
+                .clip(LocalPaneLook.current.shape)
                 .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-                .border(2.dp, MaterialTheme.colorScheme.primary, PaneShape),
+                .border(2.dp, MaterialTheme.colorScheme.primary, LocalPaneLook.current.shape),
         )
     }
 }
@@ -1009,13 +1022,13 @@ fun TerminalPane(
     Box(
         Modifier
             .fillMaxSize()
-            .clip(PaneShape)
-            .border(1.dp, ringColor, PaneShape),
+            .clip(LocalPaneLook.current.shape)
+            .border(1.dp, ringColor, LocalPaneLook.current.shape),
     ) {
         AndroidView(
             modifier = Modifier
                 .fillMaxSize()
-                .clip(PaneShape),
+                .clip(LocalPaneLook.current.shape),
             factory = { ctx ->
                 TerminalView(ctx) { app.fonts.value }.also { view ->
                     view.fontSizeSp = settings.fontSizeSp

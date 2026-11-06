@@ -299,7 +299,8 @@ fun Workspace(
         if (spawnTarget != null) rootView.performHapticFeedback(HapticFeedbackConstants.SEGMENT_FREQUENT_TICK)
     }
 
-    CompositionLocalProvider(LocalBlockProgress provides progress) {
+    val paneLook = if (settings.paneLayout == "tight") TightPanes else RelaxedPanes
+    CompositionLocalProvider(LocalBlockProgress provides progress, LocalPaneLook provides paneLook) {
     Box(
         Modifier
             .fillMaxSize()
@@ -386,7 +387,8 @@ fun Workspace(
                         Modifier
                             .weight(1f)
                             .fillMaxWidth()
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                            // Tight panes fill the screen edge to edge, as tmux does.
+                            .padding(horizontal = if (paneLook.tight) 0.dp else 6.dp, vertical = if (paneLook.tight) 0.dp else 2.dp)
                             .layout { measurable, constraints ->
                                 val inset = arrangeInset.value.roundToPx()
                                 val placeable = measurable.measure(constraints.offset(-inset * 2, -inset * 2))

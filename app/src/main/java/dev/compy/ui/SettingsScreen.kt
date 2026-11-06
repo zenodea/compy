@@ -257,6 +257,8 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
                         Segments(listOf("system" to "System", "light" to "Light", "dark" to "Dark"), settings.themeMode) { v -> update { it.copy(themeMode = v) } }
                     }
                     SwitchRow("AMOLED black", "Use a pure black canvas with dark colors", settings.amoled) { v -> update { it.copy(amoled = v) } }
+                    Row2("Pane layout", "Tight packs panes edge to edge with thin lines, like tmux. Only changes how Compy shows them.")
+                    Segments(listOf("relaxed" to "Relaxed", "tight" to "Tight"), settings.paneLayout) { v -> update { it.copy(paneLayout = v) } }
                 }
             }
             item {
