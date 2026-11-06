@@ -2,10 +2,14 @@ package dev.compy.ui
 
 import dev.compy.rex.BlockInfo
 import dev.compy.rex.FractionRect
+import dev.compy.rex.LayerView
+import dev.compy.rex.LayoutNode
+import dev.compy.rex.WindowView
 import dev.compy.rex.layerBounds
 import dev.compy.rex.parseDetachedBlocks
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -76,5 +80,33 @@ class FloatingLayerTest {
             listOf(BlockInfo("b", "loose", "t", "f", null), BlockInfo("c", "", "t", "f", null)),
             parseDetachedBlocks(json),
         )
+    }
+
+    private fun twoPanes(floating: LayerView? = null): WindowView {
+        val whole = FractionRect(0f, 0f, 1f, 1f)
+        val split = LayoutNode.Split(
+            whole, "s", horizontal = true, ratio = 0.5f,
+            before = LayoutNode.Leaf(FractionRect(0f, 0f, 0.5f, 1f), "a"),
+            after = LayoutNode.Leaf(FractionRect(0.5f, 0f, 0.5f, 1f), "b"),
+        )
+        val tiled = LayerView("t", floating = false, minimized = false, bounds = whole, layout = split, blocks = emptyList())
+        return WindowView("w", "", "a", null, listOfNotNull(tiled, floating))
+    }
+
+    @Test
+    fun aCarriedPaneSwapsFromTheMiddleAndSplitsFromTheEdges() {
+        val window = twoPanes()
+        assertEquals(DropZone.Swap, moveDrop(window, 0.75f, 0.5f, "a")?.zone)
+        assertEquals("b", moveDrop(window, 0.75f, 0.5f, "a")?.anchor)
+        assertEquals(DropZone.Right, moveDrop(window, 0.97f, 0.5f, "a")?.zone)
+        assertEquals(DropZone.Top, moveDrop(window, 0.75f, 0.05f, "a")?.zone)
+    }
+
+    @Test
+    fun aCarriedPaneLandsNowhereOnItselfOrUnderAFloatingPane() {
+        assertNull(moveDrop(twoPanes(), 0.25f, 0.5f, "a"))
+        val float = LayerView("f", floating = true, minimized = false, bounds = FractionRect(0.6f, 0.2f, 0.3f, 0.3f), layout = null, blocks = emptyList())
+        assertNull(moveDrop(twoPanes(float), 0.7f, 0.3f, "a"))
+        assertEquals("b", moveDrop(twoPanes(float.copy(minimized = true)), 0.7f, 0.3f, "a")?.anchor)
     }
 }

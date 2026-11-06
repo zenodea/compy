@@ -225,7 +225,47 @@ fun Workspace(
         val shown = latestWindow.value ?: return null
         val area = latestArea.value ?: return null
         if (point == null || area.width <= 0f || area.height <= 0f) return null
-        return spawnDrop(shown, (point.x - area.left) / area.width, (point.y - area.top) / area.height)
+        val fx = (point.x - area.left) / area.width
+        val fy = (point.y - area.top) / area.height
+        val moving = spawn.moving
+        return if (moving != null) moveDrop(shown, fx, fy, moving) else spawnDrop(shown, fx, fy)
+    }
+    val latestConnection = rememberUpdated(connection)
+    val latestMessage = rememberUpdated(onMessage)
+    val paneLift = remember(spawn) {
+        object : PaneLift {
+            override fun lift(blockId: String, at: Offset) {
+                spawn.moving = blockId
+                spawn.armed = false
+                spawn.pointer = at - origin
+                rootView.performHapticFeedback(HapticFeedbackConstants.GESTURE_START)
+            }
+
+            override fun move(at: Offset, armed: Boolean) {
+                spawn.armed = armed
+                spawn.pointer = at - origin
+            }
+
+            override fun release(place: Boolean) {
+                val moving = spawn.moving
+                val drop = if (place && spawn.armed) dropAt(spawn.pointer) else null
+                spawn.pointer = null
+                spawn.armed = false
+                spawn.moving = null
+                val target = drop?.anchor ?: return
+                if (moving == null) return
+                val c = latestConnection.value
+                val error = latestMessage.value
+                when (drop.zone) {
+                    DropZone.Swap -> c.swapBlocks(sessionId, moving, target, error)
+                    DropZone.Left -> c.moveBlock(sessionId, moving, target, horizontal = true, before = true, onError = error)
+                    DropZone.Right -> c.moveBlock(sessionId, moving, target, horizontal = true, before = false, onError = error)
+                    DropZone.Top -> c.moveBlock(sessionId, moving, target, horizontal = false, before = true, onError = error)
+                    DropZone.Bottom -> c.moveBlock(sessionId, moving, target, horizontal = false, before = false, onError = error)
+                }
+                rootView.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+            }
+        }
     }
     val spawnTarget by remember { derivedStateOf { if (spawn.armed) dropAt(spawn.pointer) else null } }
     LaunchedEffect(spawnTarget?.anchor, spawnTarget?.zone) {
@@ -391,6 +431,8 @@ fun Workspace(
                                         }
                                     },
                                     onMessage = onMessage,
+                                    lift = paneLift,
+                                    lifted = spawn.moving?.takeIf { spawn.armed && id == window.id },
                                 )
                             }
                         }

@@ -16,6 +16,8 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
@@ -34,7 +36,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.OpenWith
 import androidx.compose.material.icons.rounded.Remove
+import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -63,7 +67,9 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
@@ -136,6 +142,8 @@ fun PaneArea(
     enabled: Boolean = true,
     onDrop: (dragged: String, target: String, zone: DropZone) -> Unit = { _, _, _ -> },
     onMessage: (String) -> Unit = {},
+    lift: PaneLift? = null,
+    lifted: String? = null,
 ) {
     val tiled = window.tiledLayer
     val overrides = remember(window.id) { mutableStateMapOf<String, Float>() }
@@ -165,15 +173,19 @@ fun PaneArea(
                     snap = dragging,
                     animateIn = isNew,
                     inset = inset,
+                    dimmed = blockId == lifted,
                 ) {
-                    TerminalPane(
-                        controller = controller,
-                        blockId = blockId,
-                        focused = blockId == controller.focusedBlockId,
-                        showFocusRing = multiple,
-                        interactive = !arranging && enabled && visible,
-                        onTapped = { onPaneTapped(blockId) },
-                    )
+                    Box(Modifier.fillMaxSize()) {
+                        TerminalPane(
+                            controller = controller,
+                            blockId = blockId,
+                            focused = blockId == controller.focusedBlockId,
+                            showFocusRing = multiple,
+                            interactive = !arranging && enabled && visible,
+                            onTapped = { onPaneTapped(blockId) },
+                        )
+                        if (lift != null) PaneGrip(blockId, multiple && !arranging && enabled, lift)
+                    }
                 }
             }
         }
@@ -477,6 +489,81 @@ internal fun nextFloatBounds(window: WindowView): FractionRect {
     return FractionRect(0.06f + step, 0.06f + step, 0.84f, 0.66f)
 }
 
+/** Carries a pane by its grip. Positions are in root coordinates. */
+interface PaneLift {
+    fun lift(blockId: String, at: Offset)
+    fun move(at: Offset, armed: Boolean)
+    fun release(place: Boolean)
+}
+
+/**
+ * The handle on a pane's top edge. Dragging it carries the pane to another place in the window.
+ * A long press inside the pane selects text and the line between panes resizes them, so the pane
+ * gets its own small handle instead.
+ */
+@Composable
+private fun BoxScope.PaneGrip(blockId: String, shown: Boolean, lift: PaneLift) {
+    val latest = rememberUpdated(lift)
+    // Kept outside of state, so a pane gliding around never recomposes its grip.
+    val coords = remember { arrayOfNulls<LayoutCoordinates>(1) }
+    var active by remember { mutableStateOf(false) }
+    val alpha by animateFloatAsState(
+        when {
+            !shown -> 0f
+            active -> 0.9f
+            else -> 0.32f
+        },
+        motion(MOTION_SHORT),
+        label = "grip",
+    )
+    if (!shown && alpha == 0f) return
+    Box(
+        Modifier
+            .align(Alignment.TopCenter)
+            .size(72.dp, 24.dp)
+            .onGloballyPositioned { coords[0] = it }
+            .pointerInput(blockId, shown) {
+                if (!shown) return@pointerInput
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    down.consume()
+                    val start = coords[0]?.takeIf { it.isAttached } ?: return@awaitEachGesture
+                    active = true
+                    latest.value.lift(blockId, start.localToRoot(down.position))
+                    var armed = false
+                    var place = false
+                    try {
+                        while (true) {
+                            val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) {
+                                // A cancelled touch ends consumed, and shouldn't move anything.
+                                place = armed && !change.isConsumed
+                                break
+                            }
+                            if ((change.position - down.position).getDistance() > viewConfiguration.touchSlop) armed = true
+                            val now = coords[0]?.takeIf { it.isAttached } ?: break
+                            latest.value.move(now.localToRoot(change.position), armed)
+                            change.consume()
+                        }
+                    } finally {
+                        active = false
+                        latest.value.release(place)
+                    }
+                }
+            },
+    ) {
+        Box(
+            Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 6.dp)
+                .size(if (active) 40.dp else 32.dp, 4.dp)
+                .graphicsLayer { this.alpha = alpha }
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.onSurface),
+        )
+    }
+}
+
 /** One pane's place in the window: it glides to new positions and fades when hidden by a zoom. */
 @Composable
 private fun AnimatedPane(
@@ -486,6 +573,7 @@ private fun AnimatedPane(
     snap: Boolean,
     animateIn: Boolean,
     inset: State<Dp>,
+    dimmed: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     val spec: AnimationSpec<Float> = if (snap) snap() else motion()
@@ -494,6 +582,8 @@ private fun AnimatedPane(
     val w = animateFloatAsState(target.w, spec, label = "pane-w")
     val h = animateFloatAsState(target.h, spec, label = "pane-h")
     val fade = animateFloatAsState(if (visible) 1f else 0f, motion(MOTION_SHORT), label = "pane-fade")
+    // A pane being carried elsewhere stays in place, faded, until it lands.
+    val dim = animateFloatAsState(if (dimmed) 0.4f else 1f, motion(MOTION_SHORT), label = "pane-dim")
     val enter = remember { Animatable(if (animateIn) 0f else 1f) }
     LaunchedEffect(Unit) { enter.animateTo(1f, motion()) }
     Box(
@@ -501,7 +591,7 @@ private fun AnimatedPane(
             .zIndex(if (onTop) 1f else 0f)
             .fractionalPane({ FractionRect(x.value, y.value, w.value, h.value) }, { inset.value })
             .graphicsLayer {
-                alpha = fade.value * enter.value
+                alpha = fade.value * enter.value * dim.value
                 val scale = 0.94f + 0.06f * enter.value
                 scaleX = scale
                 scaleY = scale
@@ -605,6 +695,8 @@ internal fun zoneRect(r: FractionRect, zone: DropZone): FractionRect = when (zon
 class PaneSpawn {
     var pointer by mutableStateOf<Offset?>(null)
     var armed by mutableStateOf(false)
+    /** The pane being carried by its grip, or null while a new pane is being placed. */
+    var moving by mutableStateOf<String?>(null)
 }
 
 /** Where a dragged mini window would land. With no anchor, the window has no panes to split. */
@@ -630,6 +722,22 @@ internal fun spawnDrop(window: WindowView, fx: Float, fy: Float): SpawnDrop? {
         return SpawnDrop(hit.first, zone, zoneRect(hit.second, zone))
     }
     return if (any) null else SpawnDrop(null, DropZone.Swap, whole)
+}
+
+/**
+ * Where a pane carried by its grip would land: beside another tiled pane, or swapped with it from
+ * its middle. Floating panes cover what's beneath them, so a point over one lands nowhere.
+ */
+internal fun moveDrop(window: WindowView, fx: Float, fy: Float, moving: String): SpawnDrop? {
+    if (fx < 0f || fx >= 1f || fy < 0f || fy >= 1f || window.zoomedBlockId != null) return null
+    fun FractionRect.contains() = fx >= x && fx < x + w && fy >= y && fy < y + h
+    if (window.floatingLayers.any { !it.minimized && it.bounds.contains() }) return null
+    val panes = mutableListOf<Pair<String, FractionRect>>()
+    window.tiledLayer?.layout?.let { place(it, FractionRect(0f, 0f, 1f, 1f), emptyMap(), panes, mutableListOf()) }
+    val (target, r) = panes.firstOrNull { it.second.contains() } ?: return null
+    if (target == moving) return null
+    val zone = zoneFor((fx - r.x) / r.w, (fy - r.y) / r.h)
+    return SpawnDrop(target, zone, zoneRect(r, zone))
 }
 
 /** The mini window under the finger and the highlight showing where it would land. */
@@ -663,7 +771,16 @@ fun PaneSpawnOverlay(spawn: PaneSpawn, drop: SpawnDrop?, area: Rect?, modifier: 
                         .clip(PaneShape)
                         .background(scheme.primary.copy(alpha = 0.3f))
                         .border(2.dp, scheme.primary, PaneShape),
-                )
+                    contentAlignment = Alignment.Center,
+                ) {
+                    AnimatedVisibility(
+                        spawn.moving != null && drop?.zone == DropZone.Swap,
+                        enter = fadeIn(motion(MOTION_SHORT)) + scaleIn(motion(MOTION_SHORT), initialScale = 0.6f),
+                        exit = fadeOut(motion(MOTION_SHORT)) + scaleOut(motion(MOTION_SHORT), targetScale = 0.6f),
+                    ) {
+                        androidx.compose.material3.Icon(Icons.Rounded.SwapHoriz, "Swap", Modifier.size(36.dp), tint = scheme.primary)
+                    }
+                }
             }
         }
         val visible = remember { MutableTransitionState(false) }
@@ -691,13 +808,17 @@ fun PaneSpawnOverlay(spawn: PaneSpawn, drop: SpawnDrop?, area: Rect?, modifier: 
                     .border(1.5.dp, scheme.primary, shape),
                 contentAlignment = Alignment.Center,
             ) {
-                androidx.compose.material3.Icon(Icons.Rounded.Add, null, tint = scheme.primary)
+                // Kept through the fade out, after the drag has already ended.
+                var moving by remember { mutableStateOf(false) }
+                if (spawn.pointer != null) moving = spawn.moving != null
+                androidx.compose.material3.Icon(if (moving) Icons.Rounded.OpenWith else Icons.Rounded.Add, null, tint = scheme.primary)
             }
         }
     }
 }
 
-private fun zoneFor(x: Float, y: Float): DropZone {
+/** Like [splitZone], with the middle of the pane swapping the two. */
+internal fun zoneFor(x: Float, y: Float): DropZone {
     val dx = x - 0.5f
     val dy = y - 0.5f
     if (kotlin.math.abs(dx) < 0.2f && kotlin.math.abs(dy) < 0.2f) return DropZone.Swap
