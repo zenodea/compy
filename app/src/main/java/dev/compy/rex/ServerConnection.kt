@@ -1,7 +1,9 @@
 package dev.compy.rex
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -120,6 +122,9 @@ class ServerConnection(
     @Volatile private var control: RexControl? = null
     private var reconnectToken: String? = null
     private var connectJob: Job? = null
+    /** The control connection being opened or in use. Closes reported by any other are stale. */
+    @Volatile private var attempt: RexControl? = null
+    private val connectLock = Any()
     private var retries = 0
     @Volatile private var wanted = false
 
@@ -153,6 +158,7 @@ class ServerConnection(
         connectJob?.cancel()
         val c = control
         control = null
+        attempt = null
         terminals.values.forEach { it.pause() }
         c?.abandon()
         _state.value = ConnectionState.Offline("Paused")
@@ -189,21 +195,31 @@ class ServerConnection(
         connectJob?.cancel()
         terminals.values.forEach { it.stop() }
         terminals.clear()
+        attempt = null
         control?.close()
         control = null
     }
 
-    private fun startConnecting() {
+    private fun startConnecting(): Unit = synchronized(connectLock) {
+        connectJob?.cancel()
+        // The close callback needs the connection it belongs to, which doesn't exist yet.
+        val self = arrayOfNulls<RexControl>(1)
+        val c = RexControl(
+            http, config.url, clientLabel, clientVersion,
+            onEvent = ::handleEvent,
+            onClosed = { reason, code -> self[0]?.let { handleClosed(it, reason, code) } },
+        )
+        self[0] = c
+        attempt = c
         connectJob = scope.launch {
             _state.value = ConnectionState.Connecting
-            val c = RexControl(
-                http, config.url, clientLabel, clientVersion,
-                onEvent = ::handleEvent,
-                onClosed = { reason, code -> handleClosed(reason, code) },
-            )
             try {
                 val welcome = c.open(reconnectToken)
-                control = c
+                synchronized(connectLock) {
+                    // A newer attempt took over while this one waited.
+                    if (attempt !== c) throw CancellationException("Replaced by a newer connection")
+                    control = c
+                }
                 reconnectToken = welcome.reconnectToken
                 _clientId.value = welcome.clientId
                 _versionWarning.value = if (welcome.apiRevision != RexControl.API_REVISION) {
@@ -228,19 +244,32 @@ class ServerConnection(
                     }
                 }
             } catch (e: Exception) {
-                if (control === c) control = null
                 c.abandon()
-                handleClosed(e.message ?: "Connection failed", 0)
+                if (e is CancellationException && e !is TimeoutCancellationException) {
+                    // Replaced or stopped on purpose; whoever did that already decided what's next.
+                    synchronized(connectLock) { if (control === c) control = null }
+                    throw e
+                }
+                handleClosed(c, if (e is TimeoutCancellationException) SLOW_ANSWER else e.message ?: "Connection failed", 0)
             }
         }
     }
 
-    private fun handleClosed(reason: String, code: Int) {
+    /**
+     * Schedules one reconnect after [from] closes. A failed attempt reports its close both from
+     * the socket and from the attempt itself, and connections that were already replaced can close
+     * later, so only the first report from the current connection counts. Before this check every
+     * failure started two retry loops, and a few minutes offline left dozens of clients connected.
+     */
+    private fun handleClosed(from: RexControl, reason: String, code: Int): Unit = synchronized(connectLock) {
+        if (from !== attempt) return
+        attempt = null
         control = null
         if (!wanted) return
         _state.value = ConnectionState.Offline(reason)
         val wait = minOf(30_000L, 1_000L shl minOf(retries, 5))
         retries++
+        connectJob?.cancel()
         connectJob = scope.launch {
             delay(wait)
             if (wanted && control == null) startConnecting()
@@ -725,6 +754,8 @@ class ServerConnection(
             }
             try {
                 block(c)
+            } catch (e: TimeoutCancellationException) {
+                onError(SLOW_ANSWER)
             } catch (e: Exception) {
                 onError(e.message ?: "That didn't work")
             }
@@ -1074,6 +1105,7 @@ class ServerConnection(
     }
 
     private companion object {
+        const val SLOW_ANSWER = "The server took too long to answer"
         const val MAX_THEME_PROBES = 6
         const val THEME_PROBE_WAIT_MS = 1_500L
         const val CLIPBOARD_PART_BYTES = 262_144
