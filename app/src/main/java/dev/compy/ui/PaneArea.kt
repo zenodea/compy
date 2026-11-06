@@ -40,6 +40,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DragIndicator
 import androidx.compose.material.icons.rounded.OpenWith
 import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.SwapHoriz
@@ -100,6 +101,12 @@ data class PaneLook(val shape: Shape, val gap: Dp, val tight: Boolean)
 val RelaxedPanes = PaneLook(RoundedCornerShape(18.dp), 6.dp, tight = false)
 val TightPanes = PaneLook(RectangleShape, 1.dp, tight = true)
 val LocalPaneLook = staticCompositionLocalOf { RelaxedPanes }
+
+/** How far the drag handle sits from a pane's corner; rounded corners need it further in. */
+private val PaneLook.handleInset: Dp get() = if (tight) 3.dp else 6.dp
+
+/** Extra room above a pane's text, so its first line starts just below the drag handle. */
+private val PaneLook.handleSpace: Dp get() = handleInset + 11.dp
 
 private data class PlacedSplit(
     val split: LayoutNode.Split,
@@ -197,6 +204,8 @@ fun PaneArea(
                         showFocusRing = multiple,
                         interactive = !arranging && enabled && visible,
                         onTapped = { onPaneTapped(blockId) },
+                        // Room for the drag handle in the corner, which shows once there are two panes.
+                        handleSpace = lift != null && multiple && !arranging,
                     )
                 }
             }
@@ -518,10 +527,9 @@ interface PaneLift {
 }
 
 /**
- * The handle on a pane's right edge. Dragging it carries the pane to another place in the window.
+ * The drag handle in a pane's top-left corner. Dragging it carries the pane to another place in the window.
  * A long press inside the pane selects text and the lines between panes resize them, so the pane
- * gets its own small handle. It sits above the dividers and away from their middle, so it never
- * fights them for a touch.
+ * gets its own small handle. It sits above the dividers, so it wins where the two meet.
  */
 @Composable
 private fun PaneGrip(
@@ -537,8 +545,6 @@ private fun PaneGrip(
     val spec: AnimationSpec<Float> = if (snap) snap() else motion()
     val x = animateFloatAsState(target.x, spec, label = "grip-x")
     val y = animateFloatAsState(target.y, spec, label = "grip-y")
-    val w = animateFloatAsState(target.w, spec, label = "grip-w")
-    val h = animateFloatAsState(target.h, spec, label = "grip-h")
     // Kept outside of state, so a pane gliding around never recomposes its grip.
     val coords = remember { arrayOfNulls<LayoutCoordinates>(1) }
     var active by remember { mutableStateOf(false) }
@@ -551,7 +557,8 @@ private fun PaneGrip(
         motion(MOTION_SHORT),
         label = "grip",
     )
-    val length by animateDpAsState(if (active) 44.dp else 34.dp, motion(MOTION_SHORT), label = "grip-length")
+    val handleInset = LocalPaneLook.current.handleInset
+    val grow by animateFloatAsState(if (active) 1.2f else 1f, spring(dampingRatio = 0.5f, stiffness = 600f), label = "grip-grow")
     if (!shown && alpha == 0f) return
     Box(
         Modifier
@@ -559,15 +566,12 @@ private fun PaneGrip(
                 val i = inset.value.roundToPx()
                 val parentW = constraints.maxWidth
                 val parentH = constraints.maxHeight
-                val right = (parentW * (x.value + w.value)).roundToInt() - i
+                val left = (parentW * x.value).roundToInt() + i
                 val top = (parentH * y.value).roundToInt() + i
-                val height = (parentH * (y.value + h.value)).roundToInt() - i - top
-                val boxW = 28.dp.roundToPx()
-                val boxH = minOf(72.dp.roundToPx(), height).coerceAtLeast(1)
-                // A third of the way down: clear of the divider handles, which sit in the middle.
-                val center = if (height < 180.dp.roundToPx()) height / 2 else maxOf(56.dp.roundToPx(), height / 3)
-                val placeable = measurable.measure(Constraints.fixed(boxW, boxH))
-                layout(parentW, parentH) { placeable.place(right - boxW, top + center - boxH / 2) }
+                // Tucked into the top-left corner, where the dividers' handles never are.
+                val box = 34.dp.roundToPx()
+                val placeable = measurable.measure(Constraints.fixed(box, box))
+                layout(parentW, parentH) { placeable.place(left, top) }
             }
             .onGloballyPositioned { coords[0] = it }
             .pointerInput(blockId, shown) {
@@ -600,14 +604,19 @@ private fun PaneGrip(
                 }
             },
     ) {
-        Box(
+        androidx.compose.material3.Icon(
+            Icons.Rounded.DragIndicator,
+            "Move pane",
             Modifier
-                .align(Alignment.CenterEnd)
-                .padding(end = 6.dp)
-                .size(4.dp, length)
-                .graphicsLayer { this.alpha = alpha }
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.onSurface),
+                .align(Alignment.TopStart)
+                .padding(start = handleInset, top = handleInset)
+                .size(18.dp)
+                .graphicsLayer {
+                    this.alpha = alpha
+                    scaleX = grow
+                    scaleY = grow
+                },
+            tint = MaterialTheme.colorScheme.onSurface,
         )
     }
 }
@@ -1000,8 +1009,11 @@ fun TerminalPane(
     showFocusRing: Boolean,
     interactive: Boolean,
     onTapped: () -> Unit,
+    handleSpace: Boolean = false,
 ) {
     val app = controller.app
+    val density = LocalDensity.current
+    val look = LocalPaneLook.current
     val settings by app.settings.collectAsStateWithLifecycle()
     val fonts by app.fonts.collectAsStateWithLifecycle()
     val session = remember(blockId) { controller.connection.terminal(controller.sessionId, blockId) }
@@ -1039,6 +1051,7 @@ fun TerminalPane(
             },
             update = { view ->
                 view.interactive = interactive
+                view.topSpace = if (handleSpace) with(density) { look.handleSpace.toPx() } else 0f
                 view.keepSize = settings.sizeModes[controller.sessionId] == SizeMode.Keep
                 view.paneFocused = focused && interactive
                 view.fontSizeSp = settings.fontSizeSp

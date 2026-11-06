@@ -118,6 +118,17 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     /** Keeps text clear of the pane's rounded corners. */
     private val padding = 8 * density
 
+    /** Extra room above the text, in pixels, so a pane's drag handle doesn't cover the first line. */
+    var topSpace = 0f
+        set(value) {
+            if (field != value) {
+                field = value
+                reportGrid()
+                invalidate()
+            }
+        }
+    private val padTop get() = padding + topSpace
+
     // Selection, in viewport cells.
     private var selecting = false
     private var selStartX = 0
@@ -204,7 +215,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     private fun reportGrid() {
         if (width <= 0 || height <= 0 || !interactive) return
         val avail = width - padding * 2
-        val availH = height - padding * 2
+        val availH = height - padding - padTop
         val cols = max(2, floor(avail / cellW).toInt())
         val rows = max(1, floor(availH / cellH).toInt())
         host?.onGridMeasured(cols, rows, Math.round(cellW), Math.round(cellH))
@@ -216,7 +227,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         // when the terminal will have been resized to fit.
         if (interactive && !keepSize && SystemClock.uptimeMillis() - sizeChangedAt < SIZE_SETTLE_MS) return 1f
         val w = cols * cellW + padding * 2
-        val h = rows * cellH + padding * 2
+        val h = rows * cellH + padding + padTop
         val fit = min(width / w, height / h)
         return min(1f, fit) * zoom
     }
@@ -224,7 +235,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     private fun clampPan() {
         val s = scale(meta[GhosttyTerminal.META_COLS], meta[GhosttyTerminal.META_ROWS])
         val w = meta[GhosttyTerminal.META_COLS] * cellW * s + padding * 2
-        val h = meta[GhosttyTerminal.META_ROWS] * cellH * s + padding * 2
+        val h = meta[GhosttyTerminal.META_ROWS] * cellH * s + padding + padTop
         panX = panX.coerceIn(0f, max(0f, w - width))
         panY = panY.coerceIn(0f, max(0f, h - height))
     }
@@ -274,7 +285,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         }
         val s = scale(cols, rows)
         canvas.save()
-        canvas.translate(padding - panX, padding - panY)
+        canvas.translate(padding - panX, padTop - panY)
         canvas.scale(s, s)
         for (y in 0 until rows) drawRow(canvas, y, cols, defaultFg, defaultBg)
         drawLinks(canvas, defaultFg)
@@ -721,7 +732,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
 
     private fun cellY(py: Float): Int {
         val s = scale(meta[GhosttyTerminal.META_COLS], meta[GhosttyTerminal.META_ROWS])
-        return floor((py + panY - padding) / (cellH * s)).toInt().coerceIn(0, max(0, meta[GhosttyTerminal.META_ROWS] - 1))
+        return floor((py + panY - padTop) / (cellH * s)).toInt().coerceIn(0, max(0, meta[GhosttyTerminal.META_ROWS] - 1))
     }
 
     private val appOwnsScroll get() = meta[GhosttyTerminal.META_MOUSE] != 0 || meta[GhosttyTerminal.META_ALT] != 0
@@ -936,9 +947,9 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                 val (sx, sy, ex, ey) = ordered()
                 val reach = HANDLE_TOUCH_DP * density
                 val startPx = padding - panX + sx * cellW * s
-                val startPy = padding - panY + sy * cellH * s
+                val startPy = padTop - panY + sy * cellH * s
                 val endPx = padding - panX + (ex + 1) * cellW * s
-                val endPy = padding - panY + (ey + 1) * cellH * s
+                val endPy = padTop - panY + (ey + 1) * cellH * s
                 val nearStart = abs(event.x - startPx) < reach && abs(event.y - startPy) < reach
                 val nearEnd = abs(event.x - endPx) < reach && abs(event.y - endPy) < reach
                 draggingHandle = when {
