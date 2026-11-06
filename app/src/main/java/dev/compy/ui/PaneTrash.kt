@@ -1,25 +1,15 @@
 package dev.compy.ui
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -41,9 +31,7 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -131,31 +119,6 @@ fun PaneTrash(spawn: PaneSpawn, area: Rect) {
         drawCircle(badge)
         drawCan(ink, lid.coerceAtLeast(-0.15f))
         drawDust(burst.value, ink)
-    }
-    // To the can's left, where neither the finger nor the card covers it.
-    AnimatedVisibility(
-        open,
-        Modifier.layout { measurable, constraints ->
-            val placeable = measurable.measure(Constraints())
-            layout(constraints.maxWidth, constraints.maxHeight) {
-                placeable.place(
-                    (rect.left - placeable.width - 10.dp.toPx()).roundToInt(),
-                    (rect.center.y - placeable.height / 2f).roundToInt(),
-                )
-            }
-        },
-        enter = fadeIn(tween(120)) + scaleIn(spring(dampingRatio = 0.5f, stiffness = 600f), initialScale = 0.5f),
-        exit = fadeOut(tween(100)) + scaleOut(tween(100), targetScale = 0.7f),
-    ) {
-        Surface(shape = CircleShape, color = scheme.errorContainer) {
-            Text(
-                "Close pane",
-                Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.labelSmall,
-                color = scheme.onErrorContainer,
-                maxLines = 1,
-            )
-        }
     }
 }
 
