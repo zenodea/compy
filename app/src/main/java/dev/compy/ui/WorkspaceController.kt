@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.net.toUri
@@ -14,6 +15,7 @@ import dev.compy.data.KeyDef
 import dev.compy.data.SizeMode
 import dev.compy.rex.RexKey
 import dev.compy.rex.ServerConnection
+import dev.compy.rex.TranscriptFeed
 import dev.compy.term.TerminalView
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -40,6 +42,13 @@ class WorkspaceController(
     private var sizesHeld = false
 
     var focusedBlockId by mutableStateOf<String?>(null)
+
+    /** Agent panes showing their conversation as a chat instead of the terminal. */
+    val chatShown = mutableStateMapOf<String, Boolean>()
+    private val feeds = HashMap<String, TranscriptFeed>()
+
+    /** The conversation of the agent in a pane, kept while the session is open so switching back is instant. */
+    fun feed(blockId: String): TranscriptFeed = feeds.getOrPut(blockId) { TranscriptFeed(connection, sessionId, blockId) }
 
     /** Modifiers latched on the key bar, as RexKey bit flags. */
     var stickyMods by mutableIntStateOf(0)

@@ -22,6 +22,7 @@ In Compy, tap **Scan pairing code** and scan what it shows, or type the `ts.net`
 - **Servers:** all your servers in one list. Activity view groups panes by what needs you.
 - **Commands:** tap `⌘` for a searchable palette of Compy's commands and the host's Rex actions; hold it to latch the modifier.
 - **Terminal tools:** tap links, find in scrollback, and jump between prompts or copy a command's output when the shell marks them with OSC 133.
+- **Agent chat:** tap the bubble in the corner of a Claude Code pane to read its conversation as a chat, with replies formatted and tool calls folded, and send it messages. Needs a one-time setup on the host (below).
 - **Notifications:** Compy can stay connected in the background and alert you when an agent needs you, finishes or fails. Open the pane from the notification, or reply to it directly.
 - **Status:** progress rings, the current folder under each window, and a haptic on the terminal bell.
 - **Input:** direct typing, a customizable key bar, a composer with voice typing, and hardware keyboard and mouse support.
@@ -30,6 +31,18 @@ In Compy, tap **Scan pairing code** and scan what it shows, or type the `ts.net`
 - **Privacy:** no telemetry. Biometric lock is on when the device supports it, and screenshot blocking is optional.
 
 With background alerts off, Compy only stays connected while it's open, and the widget and tile show the last known state, with its age.
+
+## Set up agent chat
+
+Rex doesn't share agents' conversations with clients, so Compy reads them through a small action you add to the host's Rex config. On the computer running Rex, copy [`rex/compy.lua`](rex/compy.lua) next to your `init.lua` and load it from there:
+
+```sh
+cp rex/compy.lua ~/.config/rex/compy.lua
+echo 'dofile(os.getenv("HOME") .. "/.config/rex/compy.lua")' >> ~/.config/rex/init.lua
+rex config reload
+```
+
+The action finds the transcript of the agent running in a pane (Claude Code for now) and returns part of it. It reads nothing else: the pane's agent decides the file, and callers can't name one.
 
 ## Build
 

@@ -438,7 +438,9 @@ class ServerConnection(
 
     /** An interpreter's script says more than its name, so node running claude counts as claude. */
     private fun setProgram(blockId: String, foreground: JsonObject?) {
-        val name = foreground?.get("name").str() ?: return
+        val process = foreground?.get("name").str() ?: return
+        // Claude Code's native build runs as a file named after its version, such as 2.1.319.
+        val name = if (VERSION_NAME.matches(process)) foreground?.get("argv0").str()?.substringAfterLast('/') ?: process else process
         val script = foreground?.get("script").str()?.substringAfterLast('/')
         _programs.update { it + (blockId to listOfNotNull(name, script).joinToString("/")) }
     }
@@ -1094,6 +1096,29 @@ class ServerConnection(
         )
     }
 
+    /**
+     * Part of the transcript of the agent running in a pane, from the compy_transcript action that
+     * rex/compy.lua adds to the host's Rex config. [after] reads on from a byte offset, [before]
+     * reads back from one, and neither reads the newest lines. Throws [RexError] with code
+     * not_found when the host doesn't have the action.
+     */
+    suspend fun readTranscript(sessionId: String, blockId: String, after: Long? = null, before: Long? = null): JsonObject? {
+        val c = control ?: throw RexError("disconnected", "Not connected to ${config.label}", 0)
+        ensureAttached(sessionId)
+        val result = c.call(
+            "client.action",
+            ids(sessionId, blockId) {
+                put("action", TRANSCRIPT_ACTION)
+                put("args", buildJsonObject {
+                    if (after != null) put("after", after)
+                    if (before != null) put("before", before)
+                })
+            },
+            timeoutMs = 15_000,
+        )
+        return result.obj()?.get("result").obj()
+    }
+
     suspend fun listHosts(): List<HostEntry> {
         val result = control?.call("hosts.list").obj()
         return result?.get("hosts").arr().orEmpty().mapNotNull { h ->
@@ -1113,5 +1138,8 @@ class ServerConnection(
         // Android sends clipboard text in one Binder call, which is limited to about 1 MB and
         // holds each character in two bytes.
         const val MAX_CLIPBOARD_BYTES = 400_000L
+
+        const val TRANSCRIPT_ACTION = "compy_transcript"
+        val VERSION_NAME = Regex("""\d+(\.\d+)+""")
     }
 }

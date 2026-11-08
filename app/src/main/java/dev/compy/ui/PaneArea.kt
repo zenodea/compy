@@ -78,6 +78,7 @@ import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
@@ -1048,6 +1049,13 @@ fun TerminalPane(
     val colors = remember(settings.terminalTheme, themeKey) { TerminalThemes.colors(settings.terminalTheme, scheme) }
     LaunchedEffect(session, colors) { session.setLocalTheme(colors) }
     val latestTap = rememberUpdated(onTapped)
+    val programs by controller.connection.programs.collectAsStateWithLifecycle()
+    val statuses by controller.connection.statuses.collectAsStateWithLifecycle()
+    val statusApp = statuses[blockId]?.app
+    val process = programs[blockId]
+    val agent = remember(statusApp, process) { ProgramNames.candidates(statusApp, process).firstOrNull { it in CHAT_AGENTS } }
+    val chat = agent != null && controller.chatShown[blockId] == true
+    val keyboard = LocalSoftwareKeyboardController.current
     val ringColor by animateColorAsState(
         if (showFocusRing && focused) scheme.primary.copy(alpha = 0.75f) else Color.Transparent,
         motion(MOTION_SHORT),
@@ -1073,10 +1081,10 @@ fun TerminalPane(
                 }
             },
             update = { view ->
-                view.interactive = interactive
+                view.interactive = interactive && !chat
                 view.topSpace = if (handleSpace) with(density) { look.handleSpace.toPx() } else 0f
                 view.keepSize = settings.sizeModes[controller.sessionId] == SizeMode.Keep
-                view.paneFocused = focused && interactive
+                view.paneFocused = focused && interactive && !chat
                 view.fontSizeSp = settings.fontSizeSp
                 view.tag.let { if (it !== fonts) { view.tag = fonts; view.fontsChanged() } }
             },
@@ -1085,7 +1093,27 @@ fun TerminalPane(
                 view.bind(null)
             },
         )
-        if (fallback) {
+        if (chat) {
+            AgentChat(
+                controller,
+                blockId,
+                onShowTerminal = { controller.chatShown[blockId] = false },
+                modifier = Modifier.fillMaxSize().padding(top = if (handleSpace) look.handleSpace else 0.dp),
+            )
+        }
+        if (agent != null && interactive) {
+            ChatToggle(
+                chat,
+                onClick = {
+                    // The terminal's keyboard would otherwise stay up over the chat.
+                    if (!chat) keyboard?.hide()
+                    controller.chatShown[blockId] = !chat
+                    latestTap.value()
+                },
+                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
+            )
+        }
+        if (fallback && !chat) {
             Surface(
                 Modifier.align(Alignment.BottomCenter).padding(8.dp),
                 shape = RoundedCornerShape(12.dp),
@@ -1101,7 +1129,7 @@ fun TerminalPane(
         }
         AnimatedVisibility(
             state != TerminalSession.State.Live,
-            Modifier.align(Alignment.TopEnd).padding(8.dp),
+            Modifier.align(Alignment.TopEnd).padding(top = if (agent != null) 46.dp else 8.dp, end = 8.dp),
             enter = fadeIn(motion(MOTION_SHORT)),
             exit = fadeOut(motion(MOTION_SHORT)),
         ) {
