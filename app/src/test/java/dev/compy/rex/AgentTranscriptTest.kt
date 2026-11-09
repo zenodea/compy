@@ -68,4 +68,17 @@ class AgentTranscriptTest {
         val entries = parse("""{"type":"attachment","attachment":{"type":"queued_command","origin":{"kind":"human"},"prompt":"also check signup"}}""")
         assertEquals(listOf(ChatEntry.User("0+0", "also check signup")), entries)
     }
+
+    @Test fun keepsWhereImagesAre() {
+        val entries = parse(
+            """{"type":"assistant","message":{"content":[{"type":"tool_use","id":"r1","name":"Read","input":{"file_path":"/tmp/a.png"}}]}}""",
+            """{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"r1","content":[{"type":"image","source":{"type":"base64","data":"","compy_blob":{"offset":4096,"index":1,"bytes":900},"media_type":"image/png"}}]}]}}""",
+            """{"type":"user","message":{"content":[{"type":"text","text":"like this"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":""}}]}}""",
+        )
+        val tool = entries[0] as ChatEntry.Tool
+        assertEquals(listOf(ChatImage(4096, 1, 900)), tool.result?.images)
+        assertEquals("", tool.result?.output)
+        // Sent by an older compy.lua, which didn't say where the image was.
+        assertEquals(ChatEntry.User("0+2", "like this", listOf(null)), entries[1])
+    }
 }

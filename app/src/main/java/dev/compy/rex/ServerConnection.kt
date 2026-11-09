@@ -1161,19 +1161,63 @@ class ServerConnection(
      * reads back from one, and neither reads the newest lines. Throws [RexError] with code
      * not_found when the host doesn't have the action.
      */
-    suspend fun readTranscript(sessionId: String, blockId: String, after: Long? = null, before: Long? = null): JsonObject? {
+    suspend fun readTranscript(sessionId: String, blockId: String, after: Long? = null, before: Long? = null): JsonObject? =
+        transcriptAction(sessionId, blockId, TRANSCRIPT_ACTION, buildJsonObject {
+            if (after != null) put("after", after)
+            if (before != null) put("before", before)
+        })
+
+    /**
+     * An image from a pane's agent transcript, read in parts, or null when the transcript no
+     * longer has it. Throws [RexError] with code `not_found` when the host's compy.lua predates images.
+     */
+    suspend fun readTranscriptImage(sessionId: String, blockId: String, image: ChatImage): ByteArray? {
+        val base64 = StringBuilder()
+        while (true) {
+            val part = transcriptAction(sessionId, blockId, IMAGE_ACTION, buildJsonObject {
+                put("offset", image.offset)
+                put("index", image.index)
+                put("from", base64.length)
+            }, timeoutMs = 30_000) ?: return null
+            if (part["available"].bool() != true) return null
+            val data = part["data"].str().orEmpty()
+            base64.append(data)
+            if (part["done"].bool() == true || data.isEmpty()) break
+            if (base64.length > MAX_IMAGE_BASE64) return null
+        }
+        return runCatching { android.util.Base64.decode(base64.toString(), android.util.Base64.DEFAULT) }.getOrNull()
+    }
+
+    /** Every image in a pane's agent transcript, oldest first, or null when compy.lua predates images. */
+    suspend fun listTranscriptImages(sessionId: String, blockId: String): List<ChatImage>? {
+        val result = try {
+            transcriptAction(sessionId, blockId, IMAGES_ACTION, buildJsonObject { }, timeoutMs = 30_000)
+        } catch (e: RexError) {
+            if (e.code == "not_found") return null
+            throw e
+        } ?: return emptyList()
+        return result["images"].arr().orEmpty().mapNotNull { item ->
+            val o = item.obj() ?: return@mapNotNull null
+            ChatImage(o["offset"].long() ?: return@mapNotNull null, o["index"].int() ?: return@mapNotNull null, o["bytes"].int() ?: 0)
+        }
+    }
+
+    private suspend fun transcriptAction(
+        sessionId: String,
+        blockId: String,
+        action: String,
+        args: JsonObject,
+        timeoutMs: Long = 15_000,
+    ): JsonObject? {
         val c = control ?: throw RexError("disconnected", "Not connected to ${config.label}", 0)
         ensureAttached(sessionId)
         val result = c.call(
             "client.action",
             ids(sessionId, blockId) {
-                put("action", TRANSCRIPT_ACTION)
-                put("args", buildJsonObject {
-                    if (after != null) put("after", after)
-                    if (before != null) put("before", before)
-                })
+                put("action", action)
+                put("args", args)
             },
-            timeoutMs = 15_000,
+            timeoutMs = timeoutMs,
         )
         return result.obj()?.get("result").obj()
     }
@@ -1260,6 +1304,10 @@ class ServerConnection(
         const val MAX_CLIPBOARD_BYTES = 400_000L
 
         const val TRANSCRIPT_ACTION = "compy_transcript"
+        private const val IMAGE_ACTION = "compy_image"
+        private const val IMAGES_ACTION = "compy_images"
+        /** About 24 MB of image, far more than an agent can read. */
+        private const val MAX_IMAGE_BASE64 = 32 * 1024 * 1024
         private const val UPLOAD_FINISH_MS = 60_000L
         private const val UPLOAD_API_REVISION = 11
         val VERSION_NAME = Regex("""\d+(\.\d+)+""")

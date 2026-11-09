@@ -22,7 +22,7 @@ In Compy, tap **Scan pairing code** and scan what it shows, or type the `ts.net`
 - **Servers:** all your servers in one list. Activity view groups panes by what needs you.
 - **Commands:** tap `⌘` for a searchable palette of Compy's commands and the host's Rex actions; hold it to latch the modifier.
 - **Terminal tools:** tap links, find in scrollback, and jump between prompts or copy a command's output when the shell marks them with OSC 133.
-- **Agent chat:** tap the bubble in the corner of a Claude Code pane to read its conversation as a chat, with replies formatted and tool calls folded, and send it messages. Needs a one-time setup on the host (below).
+- **Agent chat:** tap the bubble in the corner of a Claude Code pane to read its conversation as a chat, with replies formatted, tool calls folded and the images it read shown inline, plus a gallery of every image in the conversation, and send it messages. Needs a one-time setup on the host (below).
 - **Notifications:** Compy can stay connected in the background and alert you when an agent needs you, finishes or fails. Open the pane from the notification, or reply to it directly.
 - **Status:** progress rings, the current folder under each window, and a haptic on the terminal bell.
 - **Input:** direct typing, a customizable key bar, a composer with voice typing, and hardware keyboard and mouse support.
@@ -43,7 +43,9 @@ echo 'dofile(os.getenv("HOME") .. "/.config/rex/compy.lua")' >> ~/.config/rex/in
 rex config reload
 ```
 
-The action finds the transcript of the agent running in a pane (Claude Code for now) and returns part of it. It reads nothing else: the pane's agent decides the file, and callers can't name one.
+The actions find the transcript of the agent running in a pane (Claude Code for now) and return part of it, or one of its images. They read nothing else: the pane's agent decides the file, and callers can't name one.
+
+When a Compy release changes `compy.lua`, copy it again and run `rex config reload`. Images need the version from Compy 0.2.9 or later.
 
 ## Build
 

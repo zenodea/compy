@@ -51,6 +51,25 @@ class TranscriptFeed(
     private var stop = 0L
     private var raw: List<ChatEntry> = emptyList()
 
+    private val imageBytes = object : android.util.LruCache<String, ByteArray>(IMAGE_CACHE_BYTES) {
+        override fun sizeOf(key: String, value: ByteArray) = value.size
+    }
+
+    /** Names an image uniquely, even across sessions of the same pane. */
+    fun imageKey(image: ChatImage): String = "$blockId:$session:${image.offset}:${image.index}"
+
+    /** An image's bytes, fetched from the host on first use. */
+    suspend fun image(image: ChatImage): ByteArray? {
+        val key = imageKey(image)
+        imageBytes.get(key)?.let { return it }
+        val bytes = runCatching { connection.readTranscriptImage(sessionId, blockId, image) }.getOrNull() ?: return null
+        imageBytes.put(key, bytes)
+        return bytes
+    }
+
+    /** Every image in the conversation, newest first, or null when the host's compy.lua predates images. */
+    suspend fun allImages(): List<ChatImage>? = connection.listTranscriptImages(sessionId, blockId)?.asReversed()
+
     /** Reads until cancelled: every [POLL_MS], or sooner after [nudge]. */
     suspend fun run() {
         while (true) {
@@ -166,5 +185,6 @@ class TranscriptFeed(
     private companion object {
         const val POLL_MS = 1_500L
         const val MAX_ENTRIES = 4_000
+        const val IMAGE_CACHE_BYTES = 16 * 1024 * 1024
     }
 }

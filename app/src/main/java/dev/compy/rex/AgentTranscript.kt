@@ -14,7 +14,7 @@ import kotlinx.serialization.json.booleanOrNull
 sealed interface ChatEntry {
     val key: String
 
-    data class User(override val key: String, val text: String) : ChatEntry
+    data class User(override val key: String, val text: String, val images: List<ChatImage?> = emptyList()) : ChatEntry
     data class Assistant(override val key: String, val text: String) : ChatEntry
     data class Thinking(override val key: String, val text: String) : ChatEntry
 
@@ -32,7 +32,23 @@ sealed interface ChatEntry {
     data class Notice(override val key: String, val text: String) : ChatEntry
 }
 
-data class ToolResult(val ok: Boolean, val output: String)
+data class ToolResult(val ok: Boolean, val output: String, val images: List<ChatImage?> = emptyList())
+
+/**
+ * An image in a transcript, which compy.lua leaves out of the line it sends and names by where it
+ * is: the line's offset and the image's place in that line. Null where an older compy.lua sent the
+ * line without saying where its image was.
+ */
+data class ChatImage(val offset: Long, val index: Int, val bytes: Int)
+
+private fun imageOf(block: JsonObject): ChatImage? {
+    val ref = block["source"].obj()?.get("compy_blob").obj() ?: return null
+    return ChatImage(ref["offset"].long() ?: return null, ref["index"].int() ?: return null, ref["bytes"].int() ?: 0)
+}
+
+/** The images in a content field that is a list of blocks. */
+internal fun contentImages(content: JsonElement?): List<ChatImage?> =
+    content.arr().orEmpty().mapNotNull { it.obj() }.filter { it["type"].str() == "image" }.map(::imageOf)
 
 private val lenient = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -90,7 +106,7 @@ internal fun contentText(content: JsonElement?): String {
     content.str()?.let { return it }
     return content.arr().orEmpty().mapNotNull { block ->
         val b = block.obj() ?: return@mapNotNull null
-        b["text"].str() ?: if (b["type"].str() == "image") "[image]" else null
+        b["text"].str()
     }.filter { it.isNotEmpty() }.joinToString("\n")
 }
 
@@ -136,7 +152,10 @@ class ClaudeTranscriptParser : TranscriptParser {
             if (attached["type"].str() != "queued_command" || attached["origin"].obj()?.get("kind").str() != "human") return emptyList()
             val prompt = attached["prompt"]
             val raw = if (prompt is JsonArray) contentText(prompt) else prompt.str().orEmpty()
-            return claudeUserText(raw)?.let { listOf(ChatEntry.User(key, clipText(it))) }.orEmpty()
+            val images = contentImages(prompt)
+            val text = claudeUserText(raw)
+            if (text == null && images.isEmpty()) return emptyList()
+            return listOf(ChatEntry.User(key, clipText(text.orEmpty()), images))
         }
         val message = record["message"].obj() ?: return emptyList()
         return when (type) {
@@ -154,19 +173,24 @@ class ClaudeTranscriptParser : TranscriptParser {
         content.str()?.let { text -> return claudeUserText(text)?.let { listOf(ChatEntry.User(key, clipText(it))) }.orEmpty() }
         val out = mutableListOf<ChatEntry>()
         val typed = mutableListOf<String>()
+        val images = mutableListOf<ChatImage?>()
         content.arr().orEmpty().forEachIndexed { i, block ->
             val b = block.obj() ?: return@forEachIndexed
             when (b["type"].str()) {
                 "tool_result" -> out += ResultEntry(
                     "$key:$i",
                     b["tool_use_id"].str().orEmpty(),
-                    ToolResult(ok = (b["is_error"] as? JsonPrimitive)?.booleanOrNull != true, output = clipOutput(contentText(b["content"]))),
+                    ToolResult(
+                        ok = (b["is_error"] as? JsonPrimitive)?.booleanOrNull != true,
+                        output = clipOutput(contentText(b["content"])),
+                        images = contentImages(b["content"]),
+                    ),
                 )
                 "text" -> b["text"].str()?.let(::claudeUserText)?.let { typed += it }
-                "image" -> typed += "[image]"
+                "image" -> images += imageOf(b)
             }
         }
-        if (typed.isNotEmpty()) out.add(0, ChatEntry.User(key, clipText(typed.joinToString("\n"))))
+        if (typed.isNotEmpty() || images.isNotEmpty()) out.add(0, ChatEntry.User(key, clipText(typed.joinToString("\n")), images))
         return out
     }
 

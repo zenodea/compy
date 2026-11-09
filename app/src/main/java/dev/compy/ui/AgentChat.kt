@@ -65,6 +65,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.compy.rex.ChatEntry
+import dev.compy.rex.ChatImage
 import dev.compy.rex.ResultEntry
 import dev.compy.rex.TranscriptFeed
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -94,12 +95,16 @@ fun AgentChat(
     val status = statuses[blockId]
     val scheme = MaterialTheme.colorScheme
 
-    Column(
+    var viewing by remember(blockId) { mutableStateOf<ChatImage?>(null) }
+    var gallery by rememberSaveable(blockId) { mutableStateOf(false) }
+    val live = state.status == TranscriptFeed.Status.Live || state.status is TranscriptFeed.Status.Failed
+    Box(
         modifier
             .background(scheme.surface)
             // Touches stay here rather than reaching the terminal underneath.
             .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } },
     ) {
+    Column(Modifier.fillMaxSize()) {
         when (val s = state.status) {
             TranscriptFeed.Status.Loading -> Centered(Modifier.weight(1f)) { CircularProgressIndicator(Modifier.size(28.dp)) }
             TranscriptFeed.Status.NotInstalled -> SetupNeeded(controller, Modifier.weight(1f))
@@ -111,7 +116,7 @@ fun AgentChat(
             }
             TranscriptFeed.Status.Live, is TranscriptFeed.Status.Failed -> {
                 if (s is TranscriptFeed.Status.Failed) Banner(s.message)
-                Conversation(controller, feed, state, Modifier.weight(1f))
+                Conversation(controller, feed, state, { viewing = it }, Modifier.weight(1f))
                 when {
                     status?.isBlocked == true -> AskingBar(status.message, onShowTerminal)
                     status?.isWorking == true -> WorkingLine(status.message)
@@ -120,10 +125,21 @@ fun AgentChat(
             }
         }
     }
+        if (live && gallery) ChatImageGallery(feed, onOpen = { viewing = it }, onClose = { gallery = false }, modifier = Modifier.fillMaxSize())
+        // Beside the chat and terminal toggle, which the pane puts in the top-right corner.
+        if (live && !gallery) GalleryButton({ gallery = true }, Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 48.dp))
+    }
+    viewing?.let { image -> ChatImageViewer(feed, image) { viewing = null } }
 }
 
 @Composable
-private fun Conversation(controller: WorkspaceController, feed: TranscriptFeed, state: TranscriptFeed.State, modifier: Modifier) {
+private fun Conversation(
+    controller: WorkspaceController,
+    feed: TranscriptFeed,
+    state: TranscriptFeed.State,
+    onOpenImage: (ChatImage) -> Unit,
+    modifier: Modifier,
+) {
     val list = rememberLazyListState()
     val entries = state.entries.asReversed()
     // Near the top (the end of a reversed list): read further back.
@@ -153,7 +169,7 @@ private fun Conversation(controller: WorkspaceController, feed: TranscriptFeed, 
             verticalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
-            items(entries, key = { it.key }) { entry -> Entry(controller, entry) }
+            items(entries, key = { it.key }) { entry -> Entry(controller, feed, entry, onOpenImage) }
             if (state.loadingOlder) {
                 item(key = "older") { Centered { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) } }
             }
@@ -162,7 +178,7 @@ private fun Conversation(controller: WorkspaceController, feed: TranscriptFeed, 
 }
 
 @Composable
-private fun Entry(controller: WorkspaceController, entry: ChatEntry) {
+private fun Entry(controller: WorkspaceController, feed: TranscriptFeed, entry: ChatEntry, onOpenImage: (ChatImage) -> Unit) {
     val scheme = MaterialTheme.colorScheme
     when (entry) {
         is ChatEntry.User -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
@@ -171,17 +187,21 @@ private fun Entry(controller: WorkspaceController, entry: ChatEntry) {
                 color = scheme.primaryContainer,
                 modifier = Modifier.widthIn(max = 520.dp).padding(start = 40.dp),
             ) {
-                Text(
-                    entry.text,
-                    Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = scheme.onPrimaryContainer,
-                )
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (entry.text.isNotEmpty()) {
+                        Text(entry.text, style = MaterialTheme.typography.bodyMedium, color = scheme.onPrimaryContainer)
+                    }
+                    if (entry.images.isNotEmpty()) ChatImageRow(feed, entry.images, onOpenImage)
+                }
             }
         }
         is ChatEntry.Assistant -> MarkdownText(entry.text, scheme.onSurface, Modifier.fillMaxWidth().padding(end = 8.dp))
         is ChatEntry.Thinking -> Expandable(Icons.Rounded.Psychology, "Thinking", null, entry.text, mono = false)
-        is ChatEntry.Tool -> ToolRow(controller, entry)
+        is ChatEntry.Tool -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            ToolRow(controller, entry)
+            // What the agent looked at, shown without opening the row.
+            entry.result?.images?.takeIf { it.isNotEmpty() }?.let { ChatImageRow(feed, it, onOpenImage, Modifier.padding(start = 28.dp)) }
+        }
         is ChatEntry.Notice -> Text(
             entry.text,
             Modifier.fillMaxWidth().padding(vertical = 4.dp),
