@@ -1,6 +1,12 @@
-# Compy
+<p align="center">
+  <img src="fastlane/metadata/android/en-US/images/icon.png" width="128" height="128" alt="Compy's icon: a smiling purple and orange dinosaur">
+</p>
 
-An unofficial, native Android client for Rex terminal servers. Kotlin and Jetpack Compose on Android 14 and up, for phones, foldables and tablets. Not affiliated with the makers of Rex.
+<h1 align="center">Compy</h1>
+
+<p align="center">An unofficial, native Android client for Rex terminal servers, with extras for running coding agents from your phone.</p>
+
+Kotlin and Jetpack Compose on Android 14 and up, for phones, foldables and tablets. Not affiliated with the makers of Rex.
 
 ## Connect to a server
 
@@ -13,25 +19,36 @@ rex server tailscale pair
 
 In Compy, tap **Scan pairing code** and scan what it shows, or type the `ts.net` address. Release builds only use HTTPS.
 
-## Features
+## Beyond a Rex client
+
+Things Compy does on top of showing your Rex sessions:
+
+- **Agent chat:** tap the bubble in the corner of a Claude Code pane to read its conversation as a chat instead of a terminal. Replies are formatted, tool calls fold into one line each with a ✓ or ✗, and you can type a message back. Needs a one-time setup on the host ([below](#set-up-agent-chat)).
+- **Agent images:** images an agent reads show as thumbnails in the chat. Tap one to see it full screen, or open the gallery to see every image in the conversation.
+- **Agent alerts:** Compy stays connected in the background and notifies you when an agent needs you, finishes or fails. Open the pane from the notification, or reply to the agent without opening Compy.
+- **Activity view:** every pane on every server, grouped by what needs you.
+- **Send files to your computer:** share files to Compy from any app, or use **Upload files…** in a pane's menu. They're copied to that pane's computer and their paths are typed into the terminal, ready to hand to an agent. Needs Rex with API revision 11 or later on the host.
+- **Share text into a pane:** share text from any app and pick the pane to paste it into.
+- **Home screen and Quick Settings:** a widget and a tile show what your agents are doing, and app shortcuts jump straight back into a recent session.
+- **Phone-friendly typing:** a key bar you can customize, sticky modifiers, a composer with voice typing, and hardware keyboard and mouse support.
+- **Fits your screen:** each session either sizes its terminals to your phone while Compy is open, or keeps another device's size and lets you pan and zoom.
+- **Many servers:** all your Rex servers in one list, reached over Tailscale.
+- **Your look:** the app takes its colors from the host's terminal theme or from your wallpaper, and Settings offers six app icons.
+- **Privacy:** no telemetry, a biometric lock when the device supports it, and optional screenshot blocking.
+
+With background alerts off, Compy only stays connected while it's open, and the widget and tile show the last known state, with its age.
+
+## Rex, on your phone
+
+Everything you'd expect from a Rex client:
 
 - **Terminals:** live panes with scrollback, drawn by libghostty-vt.
 - **Layout:** Rex's real split layout, with draggable dividers and an arrange mode. These edits change the layout for every connected client.
-- **Panes:** press empty space and drag the mini window onto a pane to split it where the highlight shows. Float panes with a bar to drag, a corner to resize and a tray for minimized ones, or detach them to keep them running outside any window.
-- **Sizes:** each session either fits terminals to this screen while Compy is open, or keeps another device's size with pan and zoom.
-- **Servers:** all your servers in one list. Activity view groups panes by what needs you.
+- **Panes:** press empty space and drag the mini window onto a pane to split it where the highlight shows. Drag a pane by its corner handle to move or swap it, or into the trash can to close it. Float panes with a bar to drag, a corner to resize and a tray for minimized ones, or detach them to keep them running outside any window.
 - **Commands:** tap `⌘` for a searchable palette of Compy's commands and the host's Rex actions; hold it to latch the modifier.
 - **Terminal tools:** tap links, find in scrollback, and jump between prompts or copy a command's output when the shell marks them with OSC 133.
-- **Agent chat:** tap the bubble in the corner of a Claude Code pane to read its conversation as a chat, with replies formatted, tool calls folded and the images it read shown inline, plus a gallery of every image in the conversation, and send it messages. Needs a one-time setup on the host (below).
-- **Notifications:** Compy can stay connected in the background and alert you when an agent needs you, finishes or fails. Open the pane from the notification, or reply to it directly.
-- **Status:** progress rings, the current folder under each window, and a haptic on the terminal bell.
-- **Input:** direct typing, a customizable key bar, a composer with voice typing, and hardware keyboard and mouse support.
-- **Look:** the whole app takes its colors from the Rex host's terminal theme, or from your wallpaper if you prefer. Choose from six app icons in Settings.
-- **Uploads:** share files to Compy from any app, or pick them from a pane's menu, and they're copied to that pane's computer with their paths typed in. Needs Rex with API revision 11 or later on the host.
-- **Android:** predictive back, a share target for text and files, app shortcuts, a home screen widget and a Quick Settings tile.
-- **Privacy:** no telemetry. Biometric lock is on when the device supports it, and screenshot blocking is optional.
-
-With background alerts off, Compy only stays connected while it's open, and the widget and tile show the last known state, with its age.
+- **Status:** program icons, agent status dots, progress rings, the current folder under each window, and a haptic on the terminal bell.
+- **Android:** predictive back, and layouts for phones, foldables and tablets.
 
 ## Set up agent chat
 
