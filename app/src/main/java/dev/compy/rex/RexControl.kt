@@ -179,7 +179,10 @@ class RexControl(
 
     companion object {
         const val SUBPROTOCOL = "rex.control.v1"
-        const val API_REVISION = 10
+        /** The newest revision Compy speaks. The server picks the newest one both sides know. */
+        const val API_REVISION = 11
+        /** Older servers lack things Compy relies on, so they get a warning. */
+        const val MIN_API_REVISION = 10
         private const val CONNECT_TIMEOUT_MS = 15_000L
         private const val CALL_TIMEOUT_MS = 15_000L
     }

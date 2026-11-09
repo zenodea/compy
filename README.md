@@ -27,7 +27,8 @@ In Compy, tap **Scan pairing code** and scan what it shows, or type the `ts.net`
 - **Status:** progress rings, the current folder under each window, and a haptic on the terminal bell.
 - **Input:** direct typing, a customizable key bar, a composer with voice typing, and hardware keyboard and mouse support.
 - **Look:** the whole app takes its colors from the Rex host's terminal theme, or from your wallpaper if you prefer. Choose from six app icons in Settings.
-- **Android:** predictive back, a share target for text, app shortcuts, a home screen widget and a Quick Settings tile.
+- **Uploads:** share files to Compy from any app, or pick them from a pane's menu, and they're copied to that pane's computer with their paths typed in. Needs Rex with API revision 11 or later on the host.
+- **Android:** predictive back, a share target for text and files, app shortcuts, a home screen widget and a Quick Settings tile.
 - **Privacy:** no telemetry. Biometric lock is on when the device supports it, and screenshot blocking is optional.
 
 With background alerts off, Compy only stays connected while it's open, and the widget and tile show the last known state, with its age.

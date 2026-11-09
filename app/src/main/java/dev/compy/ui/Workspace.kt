@@ -1,6 +1,10 @@
 package dev.compy.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import dev.compy.system.uploadLabel
+import dev.compy.system.uploadFiles
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -690,6 +694,18 @@ private fun ActionsMenu(
     val zoomed = window?.zoomedBlockId != null
     val settings by controller.app.settings.collectAsStateWithLifecycle()
     val keepSize = (settings.sizeModes[sessionId] ?: SizeMode.TakeOver) == SizeMode.Keep
+    val context = LocalContext.current
+    var uploadTo by remember { mutableStateOf<String?>(null) }
+    val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        val block = uploadTo ?: return@rememberLauncherForActivityResult
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        connection.act(onMessage) {
+            val files = uploadFiles(context, uris)
+            onMessage("Uploading ${uploadLabel(files)}…")
+            connection.upload(sessionId, block, files)
+            onMessage("Uploaded ${uploadLabel(files)}")
+        }
+    }
 
     Box {
         RoundButton(
@@ -744,6 +760,15 @@ private fun ActionsMenu(
                 onClick = {
                     open = false
                     focused?.let { connection.closeBlock(sessionId, it, onMessage) }
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("Upload files…") },
+                enabled = focused != null,
+                onClick = {
+                    open = false
+                    uploadTo = focused
+                    pickFiles.launch(arrayOf("*/*"))
                 },
             )
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)

@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
@@ -129,6 +130,8 @@ class ServerConnection(
     @Volatile private var wanted = false
 
     private val attached = ConcurrentHashMap.newKeySet<String>()
+    /** The control API revision the server agreed to on this connection. */
+    @Volatile private var apiRevision = 0
     private val attachLock = Mutex()
     private val terminals = ConcurrentHashMap<String, TerminalSession>()
     private val viewFetches = ConcurrentHashMap<String, Job>()
@@ -222,7 +225,9 @@ class ServerConnection(
                 }
                 reconnectToken = welcome.reconnectToken
                 _clientId.value = welcome.clientId
-                _versionWarning.value = if (welcome.apiRevision != RexControl.API_REVISION) {
+                apiRevision = welcome.apiRevision
+                // Revision 10 lacks only uploads, which explain themselves when tried.
+                _versionWarning.value = if (welcome.apiRevision < RexControl.MIN_API_REVISION || welcome.apiRevision > RexControl.API_REVISION) {
                     "This server uses Rex API revision ${welcome.apiRevision}. Compy was written for ${RexControl.API_REVISION}, so some things may not work."
                 } else {
                     null
@@ -1119,6 +1124,64 @@ class ServerConnection(
         return result.obj()?.get("result").obj()
     }
 
+    /**
+     * Sends files to the machine a terminal runs on. Once they've all arrived, Rex types their
+     * paths into the terminal, as a drop of local files would. [onProgress] gets bytes sent and
+     * the total. Throws [RexError] with a message meant for people.
+     */
+    suspend fun upload(sessionId: String, blockId: String, files: List<UploadFile>, onProgress: (Long, Long) -> Unit = { _, _ -> }) {
+        if (files.isEmpty()) return
+        val c = control ?: throw RexError("disconnected", "Not connected to ${config.label}", 0)
+        if (apiRevision < UPLOAD_API_REVISION) throw RexError("not_supported", uploadRefusal(RexError("method_not_found", "", 0)), 0)
+        ensureAttached(sessionId)
+        val total = files.sumOf { it.size }
+        var sent = 0L
+        val batch = if (files.size > 1) java.util.UUID.randomUUID().toString() else null
+        val streams = mutableListOf<UploadStream>()
+        try {
+            files.forEachIndexed { index, file ->
+                val ticket = try {
+                    c.call(
+                        "com.superlogical.terminal.upload_begin",
+                        ids(sessionId, blockId) {
+                            put("args", buildJsonObject {
+                                put("ref", "upload:${java.util.UUID.randomUUID()}")
+                                put("name", file.name)
+                                put("size", file.size)
+                                if (batch != null) {
+                                    put("batch", batch)
+                                    put("index", index)
+                                    put("count", files.size)
+                                }
+                            })
+                        },
+                    ).obj()?.get("ticket").str() ?: throw RexError("internal", "The server sent no upload ticket", 0)
+                } catch (e: RexError) {
+                    throw RexError(e.code, uploadRefusal(e), e.status)
+                }
+                val stream = UploadStream(http, config.url, ticket)
+                streams += stream
+                stream.send(file) { n ->
+                    sent += n
+                    onProgress(sent, total)
+                }
+            }
+            for (stream in streams) {
+                val (code, reason) = withTimeout(UPLOAD_FINISH_MS) { stream.result() }
+                if (code != 1000) throw RexError("upload_failed", "The upload didn't finish: ${reason.ifEmpty { "code $code" }}", 0)
+            }
+        } finally {
+            streams.forEach { it.cancel() }
+        }
+    }
+
+    private fun uploadRefusal(e: RexError): String = when (e.code) {
+        "method_not_found", "not_found" -> "${config.label} runs a Rex too old for uploads. Update Rex there and restart its server."
+        "too_large" -> "That's more than ${config.label} accepts in one upload"
+        "conflict" -> "${config.label} is busy with other uploads. Try again in a moment."
+        else -> e.message ?: "The server refused the upload"
+    }
+
     suspend fun listHosts(): List<HostEntry> {
         val result = control?.call("hosts.list").obj()
         return result?.get("hosts").arr().orEmpty().mapNotNull { h ->
@@ -1140,6 +1203,8 @@ class ServerConnection(
         const val MAX_CLIPBOARD_BYTES = 400_000L
 
         const val TRANSCRIPT_ACTION = "compy_transcript"
+        private const val UPLOAD_FINISH_MS = 60_000L
+        private const val UPLOAD_API_REVISION = 11
         val VERSION_NAME = Regex("""\d+(\.\d+)+""")
     }
 }
