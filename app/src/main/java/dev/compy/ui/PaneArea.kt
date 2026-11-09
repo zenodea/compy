@@ -1,5 +1,7 @@
 package dev.compy.ui
 
+import dev.compy.rex.ServerConnection
+import androidx.compose.runtime.RememberObserver
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
@@ -1040,7 +1042,7 @@ fun TerminalPane(
     val look = LocalPaneLook.current
     val settings by app.settings.collectAsStateWithLifecycle()
     val fonts by app.fonts.collectAsStateWithLifecycle()
-    val session = remember(blockId) { controller.connection.terminal(controller.sessionId, blockId) }
+    val session = rememberTerminal(controller, blockId)
     val state by session.liveState.collectAsState()
     val fallback by session.fallbackInUse.collectAsState()
     val scheme = MaterialTheme.colorScheme
@@ -1177,7 +1179,7 @@ fun WindowThumbnail(controller: WorkspaceController, window: WindowView, modifie
 @Composable
 fun TerminalPreview(controller: WorkspaceController, blockId: String, modifier: Modifier = Modifier) {
     val app = controller.app
-    val session = remember(blockId) { controller.connection.terminal(controller.sessionId, blockId) }
+    val session = rememberTerminal(controller, blockId)
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
@@ -1188,6 +1190,34 @@ fun TerminalPreview(controller: WorkspaceController, blockId: String, modifier: 
         },
         onRelease = { it.bind(null) },
     )
+}
+
+/**
+ * The terminal for a pane on screen, held for as long as the pane is, so the connection knows which
+ * terminals it can stop.
+ */
+@Composable
+fun rememberTerminal(controller: WorkspaceController, blockId: String): TerminalSession =
+    remember(controller.connection, blockId) { TerminalHold(controller.connection, controller.sessionId, blockId) }.session
+
+private class TerminalHold(
+    private val connection: ServerConnection,
+    sessionId: String,
+    private val blockId: String,
+) : RememberObserver {
+    // Held from the moment it's remembered, so a pane switching back can't race the release.
+    val session: TerminalSession = connection.holdTerminal(sessionId, blockId)
+    private var released = false
+
+    private fun release() {
+        if (released) return
+        released = true
+        connection.dropTerminal(blockId)
+    }
+
+    override fun onRemembered() = Unit
+    override fun onForgotten() = release()
+    override fun onAbandoned() = release()
 }
 
 @Composable

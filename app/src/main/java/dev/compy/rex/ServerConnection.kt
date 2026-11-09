@@ -134,6 +134,12 @@ class ServerConnection(
     @Volatile private var apiRevision = 0
     private val attachLock = Mutex()
     private val terminals = ConcurrentHashMap<String, TerminalSession>()
+    private val holdLock = Any()
+    /** How many panes on screen show each block. */
+    private val holds = HashMap<String, Int>()
+    /** Blocks no pane shows any more, oldest first, kept warm for a while. */
+    private val idle = LinkedHashSet<String>()
+    private val idleJobs = HashMap<String, Job>()
     private val viewFetches = ConcurrentHashMap<String, Job>()
     private val owned = ConcurrentHashMap<String, String>()
 
@@ -162,6 +168,7 @@ class ServerConnection(
         val c = control
         control = null
         attempt = null
+        releaseIdleTerminals()
         terminals.values.forEach { it.pause() }
         c?.abandon()
         _state.value = ConnectionState.Offline("Paused")
@@ -172,6 +179,7 @@ class ServerConnection(
      * Terminals resume from where they were when [resumeStreams] is called.
      */
     fun pauseStreams() {
+        releaseIdleTerminals()
         terminals.values.forEach { it.pause() }
     }
 
@@ -724,9 +732,55 @@ class ServerConnection(
             ).also { it.start() }
         }
 
-    /** Stops streaming a block that's no longer on screen. */
-    fun releaseTerminal(blockId: String) {
+    /**
+     * Takes a terminal for a pane on screen. While any pane holds it, it keeps streaming. Once the
+     * last one lets go, it stays warm for a while so switching back is instant, then stops, because
+     * each terminal keeps its screen and scrollback in memory.
+     */
+    fun holdTerminal(sessionId: String, blockId: String): TerminalSession {
+        synchronized(holdLock) {
+            holds[blockId] = (holds[blockId] ?: 0) + 1
+            idle.remove(blockId)
+            idleJobs.remove(blockId)?.cancel()
+        }
+        return terminal(sessionId, blockId)
+    }
+
+    fun dropTerminal(blockId: String) {
+        synchronized(holdLock) {
+            val left = (holds[blockId] ?: return) - 1
+            if (left > 0) {
+                holds[blockId] = left
+                return
+            }
+            holds.remove(blockId)
+            idle += blockId
+            // Only the most recently left panes stay warm.
+            while (idle.size > MAX_IDLE_TERMINALS) stopIdle(idle.first())
+            idleJobs[blockId] = scope.launch {
+                delay(IDLE_TERMINAL_MS)
+                synchronized(holdLock) { if (blockId in idle) stopIdle(blockId) }
+            }
+        }
+    }
+
+    /** Stops every terminal no pane is showing, such as when the app goes to the background. */
+    fun releaseIdleTerminals() {
+        synchronized(holdLock) { idle.toList().forEach(::stopIdle) }
+    }
+
+    private fun stopIdle(blockId: String) {
+        idle.remove(blockId)
+        idleJobs.remove(blockId)?.cancel()
         terminals.remove(blockId)?.stop()
+    }
+
+    /** Stops streaming a block that's no longer on screen, unless a pane shows it. */
+    fun releaseTerminal(blockId: String) {
+        synchronized(holdLock) {
+            if (holds.containsKey(blockId) || blockId in idle) return
+            terminals.remove(blockId)?.stop()
+        }
     }
 
     /** Pastes into a block that may not be on screen, attaching to its session first. */
@@ -1195,6 +1249,9 @@ class ServerConnection(
     private companion object {
         const val SLOW_ANSWER = "The server took too long to answer"
         const val MAX_THEME_PROBES = 6
+        /** Panes left recently whose terminals stay warm. */
+        private const val MAX_IDLE_TERMINALS = 4
+        private const val IDLE_TERMINAL_MS = 60_000L
         const val THEME_PROBE_WAIT_MS = 1_500L
         const val CLIPBOARD_PART_BYTES = 262_144
 

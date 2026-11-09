@@ -28,9 +28,15 @@ static inline jint rgb(GhosttyColorRgb c) {
   return (jint)(0xFF000000u | ((uint32_t)c.r << 16) | ((uint32_t)c.g << 8) | c.b);
 }
 
+/* Scrollback kept per terminal on the phone. A snapshot brings the server's own limit, which can
+ * be far larger, and every pane Compy keeps warm holds its scrollback in memory. */
+#define SCROLLBACK_MAX_BYTES ((size_t)8 * 1024 * 1024)
+
 static Term* wrap(GhosttyTerminal t) {
   Term* h = calloc(1, sizeof(Term));
   h->term = t;
+  const size_t max_scrollback = SCROLLBACK_MAX_BYTES;
+  ghostty_terminal_set(t, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &max_scrollback);
   ghostty_render_state_new(NULL, &h->rs);
   ghostty_render_state_row_iterator_new(NULL, &h->rows);
   ghostty_render_state_row_cells_new(NULL, &h->cells);
