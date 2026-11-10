@@ -2,6 +2,7 @@ package dev.compy.data
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -155,29 +156,36 @@ class SettingsStore(private val context: Context) {
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
+        // A value this build doesn't know, such as one a newer build saved, becomes that
+        // setting's default. Without this it made everything unreadable.
+        coerceInputValues = true
     }
     private val serversKey = stringPreferencesKey("servers")
     private val settingsKey = stringPreferencesKey("settings")
 
-    val servers: Flow<List<SavedServer>> = context.store.data.map { prefs ->
-        prefs[serversKey]?.let { runCatching { json.decodeFromString<List<SavedServer>>(it) }.getOrNull() }.orEmpty()
-    }
+    val servers: Flow<List<SavedServer>> = context.store.data.map { prefs -> decode<List<SavedServer>>(prefs[serversKey]).orEmpty() }
 
-    val settings: Flow<Settings> = context.store.data.map { prefs ->
-        prefs[settingsKey]?.let { runCatching { json.decodeFromString<Settings>(it) }.getOrNull() } ?: Settings()
-    }
+    val settings: Flow<Settings> = context.store.data.map { prefs -> decode<Settings>(prefs[settingsKey]) ?: Settings() }
 
     suspend fun updateServers(change: (List<SavedServer>) -> List<SavedServer>) {
-        context.store.edit { prefs ->
-            val current = prefs[serversKey]?.let { runCatching { json.decodeFromString<List<SavedServer>>(it) }.getOrNull() }.orEmpty()
-            prefs[serversKey] = json.encodeToString(change(current))
-        }
+        context.store.edit { prefs -> prefs.change(serversKey, emptyList(), change) }
     }
 
     suspend fun updateSettings(change: (Settings) -> Settings) {
-        context.store.edit { prefs ->
-            val current = prefs[settingsKey]?.let { runCatching { json.decodeFromString<Settings>(it) }.getOrNull() } ?: Settings()
-            prefs[settingsKey] = json.encodeToString(change(current))
-        }
+        context.store.edit { prefs -> prefs.change(settingsKey, Settings(), change) }
+    }
+
+    private inline fun <reified T> decode(text: String?): T? = text?.let { runCatching { json.decodeFromString<T>(it) }.getOrNull() }
+
+    /**
+     * Saves a change to what's stored under [key]. What's stored but can't be read is about to be
+     * replaced by [fallback], which would lose every server or setting for good, so it's kept
+     * under a second key first, where it can be recovered from.
+     */
+    private inline fun <reified T> MutablePreferences.change(key: Preferences.Key<String>, fallback: T, change: (T) -> T) {
+        val stored = this[key]
+        val current = decode<T>(stored)
+        if (stored != null && current == null) this[stringPreferencesKey("${key.name}-unreadable")] = stored
+        this[key] = json.encodeToString(change(current ?: fallback))
     }
 }

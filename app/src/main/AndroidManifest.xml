@@ -30,10 +30,12 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Compy">
 
+        <!-- Not exported: other apps reach it only through the launcher entries below, which carry
+             nothing. Opened directly, its extras choose a pane to show and an alert to clear. -->
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|density|uiMode"
-            android:exported="true"
+            android:exported="false"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize" />
 

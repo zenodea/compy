@@ -30,16 +30,19 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.BrokenImage
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.PhotoLibrary
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -61,7 +64,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import dev.compy.rex.ChatImage
 import dev.compy.rex.TranscriptFeed
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
 
 /** Decoded thumbnails, shared by every chat, sized by their pixels. */
@@ -87,21 +92,38 @@ private fun decode(bytes: ByteArray, maxSide: Int): ImageBitmap? {
 
 private sealed interface Loaded {
     data object Loading : Loaded
+    /** The conversation no longer has the image. */
     data object Missing : Loaded
+    /** It couldn't be fetched or read this time. */
+    data object Failed : Loaded
     data class Ready(val bitmap: ImageBitmap) : Loaded
 }
 
+/** Loads an image. Raising [attempt] tries again after a failure. */
 @Composable
-private fun rememberImage(feed: TranscriptFeed, image: ChatImage, maxSide: Int): Loaded {
+private fun rememberImage(feed: TranscriptFeed, image: ChatImage, maxSide: Int, attempt: Int = 0): Loaded {
     val key = feed.imageKey(image)
-    val loaded by produceState<Loaded>(
-        initialValue = if (maxSide == THUMB_SIDE) thumbnails.get(key)?.let { Loaded.Ready(it) } ?: Loaded.Loading else Loaded.Loading,
-        key, maxSide,
-    ) {
+    fun cached(): Loaded = if (maxSide == THUMB_SIDE) thumbnails.get(key)?.let { Loaded.Ready(it) } ?: Loaded.Loading else Loaded.Loading
+    val loaded by produceState(initialValue = cached(), key, maxSide, attempt) {
+        // The state outlives a change of image, so start from what this one has.
+        value = cached()
         if (value is Loaded.Ready) return@produceState
-        val bitmap = withContext(Dispatchers.IO) { feed.image(image)?.let { decode(it, maxSide) } }
-        if (bitmap != null && maxSide == THUMB_SIDE) thumbnails.put(key, bitmap)
-        value = bitmap?.let { Loaded.Ready(it) } ?: Loaded.Missing
+        value = try {
+            val bytes = withContext(Dispatchers.IO) { feed.image(image) }
+            val bitmap = bytes?.let { withContext(Dispatchers.IO) { decode(it, maxSide) } }
+            if (bitmap != null && maxSide == THUMB_SIDE) thumbnails.put(key, bitmap)
+            when {
+                bytes == null -> Loaded.Missing
+                bitmap == null -> Loaded.Failed
+                else -> Loaded.Ready(bitmap)
+            }
+        } catch (e: TimeoutCancellationException) {
+            Loaded.Failed
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Loaded.Failed
+        }
     }
     return loaded
 }
@@ -111,12 +133,15 @@ private fun rememberImage(feed: TranscriptFeed, image: ChatImage, maxSide: Int):
 internal fun ChatImageThumb(feed: TranscriptFeed, image: ChatImage?, size: Dp, onOpen: (ChatImage) -> Unit, modifier: Modifier = Modifier) {
     val scheme = MaterialTheme.colorScheme
     val shape = RoundedCornerShape(10.dp)
+    var attempt by remember(image) { mutableIntStateOf(0) }
+    val loaded = image?.let { rememberImage(feed, it, THUMB_SIDE, attempt) }
     Box(
         modifier
             .size(size)
             .clip(shape)
             .background(scheme.surfaceContainerHighest)
-            .then(if (image != null) Modifier.clickable { onOpen(image) } else Modifier),
+            // A thumbnail that failed to load is tapped to try again, not to open nothing.
+            .then(if (image != null) Modifier.clickable { if (loaded == Loaded.Failed) attempt++ else onOpen(image) } else Modifier),
         contentAlignment = Alignment.Center,
     ) {
         if (image == null) {
@@ -129,9 +154,10 @@ internal fun ChatImageThumb(feed: TranscriptFeed, image: ChatImage?, size: Dp, o
             )
             return@Box
         }
-        when (val loaded = rememberImage(feed, image, THUMB_SIDE)) {
-            Loaded.Loading -> CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+        when (loaded) {
+            null, Loaded.Loading -> CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
             Loaded.Missing -> Icon(Icons.Rounded.BrokenImage, "Image unavailable", tint = scheme.onSurfaceVariant)
+            Loaded.Failed -> Icon(Icons.Rounded.Refresh, "Couldn't load this image. Tap to try again.", tint = scheme.onSurfaceVariant)
             is Loaded.Ready -> Image(loaded.bitmap, "Image", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
         }
     }
@@ -146,12 +172,13 @@ internal fun ChatImageRow(feed: TranscriptFeed, images: List<ChatImage?>, onOpen
     }
 }
 
-/** One image, full screen, to pinch and pan. Tapping outside the image or the close button leaves. */
+/** One image, full screen, to pinch and pan. The close button or going back leaves. */
 @Composable
 internal fun ChatImageViewer(feed: TranscriptFeed, image: ChatImage, onClose: () -> Unit) {
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         var scale by remember { mutableFloatStateOf(1f) }
         var offset by remember { mutableStateOf(Offset.Zero) }
+        var attempt by remember(image) { mutableIntStateOf(0) }
         Box(
             Modifier
                 .fillMaxSize()
@@ -170,9 +197,13 @@ internal fun ChatImageViewer(feed: TranscriptFeed, image: ChatImage, onClose: ()
                 },
             contentAlignment = Alignment.Center,
         ) {
-            when (val loaded = rememberImage(feed, image, FULL_SIDE)) {
+            when (val loaded = rememberImage(feed, image, FULL_SIDE, attempt)) {
                 Loaded.Loading -> CircularProgressIndicator(color = Color.White)
                 Loaded.Missing -> Text("This image is no longer in the conversation", color = Color.White)
+                Loaded.Failed -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Couldn't load this image", color = Color.White)
+                    TextButton(onClick = { attempt++ }) { Text("Try again") }
+                }
                 is Loaded.Ready -> Image(
                     loaded.bitmap,
                     "Image",

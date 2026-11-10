@@ -46,11 +46,62 @@ local function agent_of(fg)
   return nil
 end
 
+-- Claude Code's folder name for a working directory. It replaces everything
+-- but ASCII letters and digits with "-", counting as JavaScript does: once for
+-- most characters, twice for those of four bytes, such as emoji. A name over
+-- 200 long is cut there and ends in a hash of the whole path.
+local function claude_project(cwd)
+  local name, hash = {}, 0
+  local function unit(code)
+    hash = (hash * 31 + code) % 4294967296
+  end
+  local i, n = 1, #cwd
+  while i <= n do
+    local b = cwd:byte(i)
+    local len = (b < 192 and 1) or (b < 224 and 2) or (b < 240 and 3) or 4
+    if b < 128 then
+      unit(b)
+      local c = string.char(b)
+      name[#name + 1] = c:match("^[A-Za-z0-9]$") and c or "-"
+    elseif len == 1 then
+      -- Part of no character.
+      unit(0xFFFD)
+      name[#name + 1] = "-"
+    else
+      local code = b % (len == 2 and 32 or len == 3 and 16 or 8)
+      for k = 1, len - 1 do
+        code = code * 64 + ((cwd:byte(i + k) or 128) % 64)
+      end
+      if code >= 0x10000 then
+        code = code - 0x10000
+        unit(0xD800 + math.floor(code / 1024))
+        unit(0xDC00 + code % 1024)
+        name[#name + 1] = "--"
+      else
+        unit(code)
+        name[#name + 1] = "-"
+      end
+    end
+    i = i + len
+  end
+  name = table.concat(name)
+  if #name <= 200 then return name end
+  -- The hash is a signed 32-bit number, written without its sign in base 36.
+  if hash >= 2147483648 then hash = 4294967296 - hash end
+  local digits, text = "0123456789abcdefghijklmnopqrstuvwxyz", ""
+  repeat
+    local d = hash % 36
+    text = digits:sub(d + 1, d + 1) .. text
+    hash = (hash - d) / 36
+  until hash == 0
+  return name:sub(1, 200) .. "-" .. text
+end
+
 -- Each agent keeps its transcript somewhere of its own.
 local locators = {}
 
 -- Claude Code: <config>/sessions/<pid>.json names the session, and the
--- transcript is <config>/projects/<cwd, non-alphanumerics as "-">/<id>.jsonl.
+-- transcript is <config>/projects/<the cwd's folder name>/<id>.jsonl.
 locators.claude = function(fg, home)
   local dir = os.getenv("CLAUDE_CONFIG_DIR") or (home .. "/.claude")
   local text = read_file(dir .. "/sessions/" .. tostring(fg.pid) .. ".json")
@@ -58,8 +109,7 @@ locators.claude = function(fg, home)
   local ok, session = pcall(rex.json.decode, text)
   if not ok or type(session) ~= "table" or type(session.sessionId) ~= "string" then return nil end
   local cwd = session.cwd or fg.cwd or ""
-  local project = (cwd:gsub("[^%w]", "-"))
-  return dir .. "/projects/" .. project .. "/" .. session.sessionId .. ".jsonl", session.sessionId
+  return dir .. "/projects/" .. claude_project(cwd) .. "/" .. session.sessionId .. ".jsonl", session.sessionId
 end
 
 -- A line with its long base64 blobs replaced by where they are: the line's

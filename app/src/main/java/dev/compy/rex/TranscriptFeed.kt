@@ -1,6 +1,5 @@
 package dev.compy.rex
 
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -62,19 +61,14 @@ class TranscriptFeed(
     /** Names an image uniquely, even across sessions of the same pane. */
     fun imageKey(image: ChatImage): String = "$blockId:$session:${image.offset}:${image.index}"
 
-    /** An image's bytes, fetched from the host on first use. */
+    /**
+     * An image's bytes, fetched from the host on first use, or null when the conversation no
+     * longer has it. Throws when the host couldn't be asked, which is worth trying again.
+     */
     suspend fun image(image: ChatImage): ByteArray? {
         val key = imageKey(image)
         imageBytes.get(key)?.let { return it }
-        val bytes = try {
-            connection.readTranscriptImage(sessionId, blockId, image)
-        } catch (e: TimeoutCancellationException) {
-            null
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            null
-        } ?: return null
+        val bytes = connection.readTranscriptImage(sessionId, blockId, image) ?: return null
         imageBytes.put(key, bytes)
         return bytes
     }

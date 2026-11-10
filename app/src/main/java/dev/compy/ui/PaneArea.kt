@@ -1,5 +1,7 @@
 package dev.compy.ui
 
+import androidx.compose.runtime.DisposableEffect
+import dev.compy.AppState
 import dev.compy.rex.ServerConnection
 import androidx.compose.runtime.RememberObserver
 import androidx.compose.animation.AnimatedVisibility
@@ -334,6 +336,7 @@ private fun FloatingLayer(
     // What the finger set, read only while laying out so that dragging never recomposes the card.
     var local by remember(layer.id) { mutableStateOf<FractionRect?>(null) }
     val gesture = remember(layer.id) { LayerGesture() }
+    val front = rememberUpdated(isFront)
     var confirmClose by remember(layer.id) { mutableStateOf(false) }
     LaunchedEffect(layer.bounds) {
         if (gesture.active) return@LaunchedEffect
@@ -372,6 +375,21 @@ private fun FloatingLayer(
             enter = fadeIn(motion(MOTION_SHORT)) + scaleIn(motion(), initialScale = 0.88f),
             exit = fadeOut(motion(MOTION_SHORT)) + scaleOut(motion(), targetScale = 0.7f, transformOrigin = TransformOrigin(0.5f, 1f)),
         ) {
+            // A drag gets no ending when its layer is minimized or zoomed under the finger. Left
+            // as it was, the layer ignored where the server put it, and a resize went on holding
+            // every terminal's size.
+            DisposableEffect(layer.id) {
+                onDispose {
+                    if (gesture.holdingSizes) {
+                        gesture.holdingSizes = false
+                        controller.holdSizes(false)
+                    }
+                    if (gesture.active) {
+                        gesture.active = false
+                        local = null
+                    }
+                }
+            }
             Column(
                 Modifier
                     .fillMaxSize()
@@ -432,7 +450,7 @@ private fun FloatingLayer(
                                     showFocusRing = inner.size > 1,
                                     interactive = enabled,
                                     onTapped = {
-                                        if (!isFront) connection.raiseLayer(sessionId, layer.id)
+                                        if (!front.value) connection.raiseLayer(sessionId, layer.id)
                                         onPaneTapped(blockId)
                                     },
                                 )
@@ -450,14 +468,17 @@ private fun FloatingLayer(
                                     onDragStart = {
                                         gesture.active = true
                                         rect = local ?: bounds.value
-                                        if (!isFront) connection.raiseLayer(sessionId, layer.id)
+                                        if (!front.value) connection.raiseLayer(sessionId, layer.id)
+                                        gesture.holdingSizes = true
                                         controller.holdSizes(true)
                                     },
                                     onDragEnd = {
+                                        gesture.holdingSizes = false
                                         controller.holdSizes(false)
                                         finish(rect)
                                     },
                                     onDragCancel = {
+                                        gesture.holdingSizes = false
                                         controller.holdSizes(false)
                                         finish(rect)
                                     },
@@ -500,6 +521,8 @@ private fun FloatingLayer(
 /** State a floating layer's gestures share without recomposing it. */
 private class LayerGesture {
     var active = false
+    /** True while a resize holds terminal sizes back. */
+    var holdingSizes = false
     var parentW = 1f
     var parentH = 1f
 }
@@ -1058,10 +1081,7 @@ fun TerminalPane(
     val state by session.liveState.collectAsState()
     val fallback by session.fallbackInUse.collectAsState()
     val scheme = MaterialTheme.colorScheme
-    // Only the Material You theme depends on the app's colors, which change during a fade.
-    val themeKey: Any = if (settings.terminalTheme == "material") scheme else settings.terminalTheme
-    val colors = remember(settings.terminalTheme, themeKey) { TerminalThemes.colors(settings.terminalTheme, scheme) }
-    LaunchedEffect(session, colors) { session.setLocalTheme(colors) }
+    TerminalTheme(app, session)
     val latestTap = rememberUpdated(onTapped)
     val programs by controller.connection.programs.collectAsStateWithLifecycle()
     val statuses by controller.connection.statuses.collectAsStateWithLifecycle()
@@ -1192,6 +1212,9 @@ fun WindowThumbnail(controller: WorkspaceController, window: WindowView, modifie
 fun TerminalPreview(controller: WorkspaceController, blockId: String, modifier: Modifier = Modifier) {
     val app = controller.app
     val session = rememberTerminal(controller, blockId)
+    val fonts by app.fonts.collectAsStateWithLifecycle()
+    // A preview may be the only thing showing its terminal, such as a detached pane's.
+    TerminalTheme(app, session)
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
@@ -1200,8 +1223,20 @@ fun TerminalPreview(controller: WorkspaceController, blockId: String, modifier: 
                 view.bind(session)
             }
         },
+        update = { view -> view.tag.let { if (it !== fonts) { view.tag = fonts; view.fontsChanged() } } },
         onRelease = { it.bind(null) },
     )
+}
+
+/** Gives a terminal the colors chosen in Compy, wherever it's shown. */
+@Composable
+private fun TerminalTheme(app: AppState, session: TerminalSession) {
+    val settings by app.settings.collectAsStateWithLifecycle()
+    val scheme = MaterialTheme.colorScheme
+    // Only the Material You theme depends on the app's colors, which change during a fade.
+    val themeKey: Any = if (settings.terminalTheme == "material") scheme else settings.terminalTheme
+    val colors = remember(settings.terminalTheme, themeKey) { TerminalThemes.colors(settings.terminalTheme, scheme) }
+    LaunchedEffect(session, colors) { session.setLocalTheme(colors) }
 }
 
 /**
