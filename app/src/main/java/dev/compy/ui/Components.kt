@@ -112,13 +112,14 @@ fun StatusDot(blockIds: List<String>, statuses: Map<String, ProgramStatus>, atte
     val shownColor by animateColorAsState(lastColor, motion(), label = "dot-color")
     val scale by animateFloatAsState(if (color != null) 1f else 0f, motion(), label = "dot-scale")
     if (scale <= 0.01f) return
+    // Kept as state and read only while drawing. Read here, it recomposed every working dot on
+    // every frame for as long as an agent worked.
     val pulse = if (working) {
-        val value by rememberInfiniteTransition(label = "working").animateFloat(
+        rememberInfiniteTransition(label = "working").animateFloat(
             0.35f, 1f, infiniteRepeatable(tween(800), RepeatMode.Reverse), label = "working",
         )
-        value
     } else {
-        1f
+        null
     }
     Box(
         modifier
@@ -132,7 +133,7 @@ fun StatusDot(blockIds: List<String>, statuses: Map<String, ProgramStatus>, atte
             .background(MaterialTheme.colorScheme.background)
             .padding(2.dp)
             .clip(CircleShape)
-            .graphicsLayer { alpha = pulse }
+            .graphicsLayer { alpha = pulse?.value ?: 1f }
             .background(shownColor),
     )
 }
@@ -147,15 +148,20 @@ private fun ProgressRing(percent: Int?, size: Dp) {
     if (shown <= 0.01f) return
     val sweep by animateFloatAsState(((percent ?: 0).coerceAtLeast(0)) / 100f * 360f, motion(), label = "ring-sweep")
     val indeterminate = percent == -1
-    val spin by rememberInfiniteTransition(label = "ring").animateFloat(
-        0f, 360f, infiniteRepeatable(tween(1100, easing = LinearEasing)), label = "ring-spin",
-    )
+    // Only a ring with no known amount spins, so only that one keeps an animation running.
+    val spin = if (indeterminate) {
+        rememberInfiniteTransition(label = "ring").animateFloat(
+            0f, 360f, infiniteRepeatable(tween(1100, easing = LinearEasing)), label = "ring-spin",
+        )
+    } else {
+        null
+    }
     val color = MaterialTheme.colorScheme.primary
     Canvas(Modifier.size(size).graphicsLayer { alpha = shown }) {
         val stroke = 2.dp.toPx()
         drawArc(
             color,
-            startAngle = if (indeterminate) spin else -90f,
+            startAngle = spin?.value ?: -90f,
             sweepAngle = if (indeterminate) 90f else sweep,
             useCenter = false,
             topLeft = Offset(stroke / 2, stroke / 2),

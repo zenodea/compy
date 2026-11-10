@@ -165,8 +165,10 @@ private fun RowScope.KeyButton(controller: WorkspaceController, def: KeyDef, onO
     val active = bit != 0 && controller.stickyMods and bit != 0
     val locked = bit != 0 && controller.isLocked(bit)
     val scheme = MaterialTheme.colorScheme
-    val repeats = def.kind == "key" && def.mods.isEmpty() && def.icon != null
+    // Not Enter: held a moment too long, it would answer several of an agent's prompts in a row.
+    val repeats = def.kind == "key" && def.mods.isEmpty() && def.icon != null && def.key != "enter"
     var pressed by remember { mutableStateOf(false) }
+    val latestComposer = rememberUpdated(onOpenComposer)
     val background by animateColorAsState(
         when {
             locked -> scheme.primary
@@ -190,14 +192,16 @@ private fun RowScope.KeyButton(controller: WorkspaceController, def: KeyDef, onO
             .clip(RoundedCornerShape(12.dp))
             .background(background)
             .semantics { contentDescription = def.label }
-            .pointerInput(def) {
+            // Keyed on the controller too, or a key pressed before would go on typing into the
+            // session it was first shown for.
+            .pointerInput(def, controller) {
                 detectTapGestures(
                     onPress = {
                         pressed = true
                         haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         when {
                             def.kind == "sticky" -> if (tryAwaitRelease()) controller.toggleSticky(bit)
-                            def.kind == "composer" -> if (tryAwaitRelease()) onOpenComposer()
+                            def.kind == "composer" -> if (tryAwaitRelease()) latestComposer.value()
                             repeats -> {
                                 controller.press(def)
                                 val repeat = scope.launch {

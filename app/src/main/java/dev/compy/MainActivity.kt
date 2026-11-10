@@ -2,15 +2,14 @@ package dev.compy
 
 import android.content.Intent
 import android.os.Bundle
-import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.compy.ui.CompyRoot
 import dev.compy.ui.CompyTheme
+import dev.compy.ui.HideFromScreenshots
 
 class MainActivity : FragmentActivity() {
     private val state get() = (application as CompyApp).state
@@ -18,17 +17,14 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        handleIntent(intent)
+        // Not when restored or reopened from Recents: that delivers the first intent again, and
+        // would jump back to the pane a notification opened long ago.
+        val replayed = savedInstanceState != null || intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0
+        if (!replayed) handleIntent(intent)
         setContent {
             val settings by state.settings.collectAsStateWithLifecycle()
             val hostColors by state.appColors.collectAsStateWithLifecycle()
-            LaunchedEffect(settings.blockScreenshots) {
-                if (settings.blockScreenshots) {
-                    window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-                } else {
-                    window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-                }
-            }
+            HideFromScreenshots(window, settings.blockScreenshots)
             CompyTheme(settings, hostColors) {
                 CompyRoot(state, this)
             }
@@ -37,6 +33,7 @@ class MainActivity : FragmentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleIntent(intent)
     }
 

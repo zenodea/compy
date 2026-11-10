@@ -274,6 +274,8 @@ private fun ReorderableKeys(keys: List<KeyDef>, onMove: (Int, Int) -> Unit, onRe
     val rowPx = with(LocalDensity.current) { RowHeight.toPx() }
     var dragging by remember { mutableIntStateOf(-1) }
     var dragY by remember { mutableFloatStateOf(0f) }
+    // The gesture outlives a change of page, and would otherwise move keys on the page it began on.
+    val latestMove = rememberUpdated(onMove)
     val target = if (dragging >= 0) (dragging + (dragY / rowPx).roundToInt()).coerceIn(0, keys.lastIndex) else -1
     val scheme = MaterialTheme.colorScheme
     Column(Modifier.fillMaxWidth().padding(top = 4.dp)) {
@@ -322,7 +324,7 @@ private fun ReorderableKeys(keys: List<KeyDef>, onMove: (Int, Int) -> Unit, onRe
                                         val to = (from + (dragY / rowPx).roundToInt()).coerceIn(0, keys.lastIndex)
                                         dragging = -1
                                         dragY = 0f
-                                        if (from != to) onMove(from, to)
+                                        if (from != to) latestMove.value(from, to)
                                     },
                                     onDragCancel = {
                                         dragging = -1

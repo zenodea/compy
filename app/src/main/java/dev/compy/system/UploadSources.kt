@@ -14,6 +14,10 @@ import java.io.File
  */
 suspend fun uploadFiles(context: Context, uris: List<Uri>): List<UploadFile> = withContext(Dispatchers.IO) {
     val resolver = context.contentResolver
+    val dir = File(context.cacheDir, "uploads")
+    // Copies an upload left behind, such as when the app was closed partway through.
+    val stale = System.currentTimeMillis() - 60 * 60 * 1000L
+    dir.listFiles()?.filter { it.lastModified() < stale }?.forEach { it.delete() }
     uris.mapIndexed { i, uri ->
         var name: String? = null
         var size: Long? = null
@@ -30,13 +34,15 @@ suspend fun uploadFiles(context: Context, uris: List<Uri>): List<UploadFile> = w
         if (known != null && known >= 0) {
             UploadFile(fileName, known) { resolver.openInputStream(uri) ?: error("Couldn't open $fileName") }
         } else {
-            val dir = File(context.cacheDir, "uploads").apply { mkdirs() }
-            // Copies from earlier uploads are long finished.
-            val stale = System.currentTimeMillis() - 60 * 60 * 1000L
-            dir.listFiles()?.filter { it.lastModified() < stale }?.forEach { it.delete() }
+            dir.mkdirs()
             val copy = File.createTempFile("upload", null, dir)
-            resolver.openInputStream(uri)?.use { input -> copy.outputStream().use { input.copyTo(it) } } ?: error("Couldn't open $fileName")
-            UploadFile(fileName, copy.length()) { copy.inputStream() }
+            try {
+                resolver.openInputStream(uri)?.use { input -> copy.outputStream().use { input.copyTo(it) } } ?: error("Couldn't open $fileName")
+            } catch (e: Exception) {
+                copy.delete()
+                throw e
+            }
+            UploadFile(fileName, copy.length(), discard = { copy.delete() }) { copy.inputStream() }
         }
     }
 }

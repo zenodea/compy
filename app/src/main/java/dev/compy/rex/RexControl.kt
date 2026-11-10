@@ -152,7 +152,8 @@ class RexControl(
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-            webSocket.close(code, null)
+            // Not the peer's code: one sent without a status arrives as 1005, which can't be sent back.
+            webSocket.close(1000, null)
             finish(reason.ifEmpty { "Connection closed" }, code)
         }
 

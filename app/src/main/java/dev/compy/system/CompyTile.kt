@@ -12,12 +12,7 @@ class CompyTile : TileService() {
         val tile = qsTile ?: return
         val snapshot = StatusSnapshot.read(this)
         tile.state = if (snapshot.blocked > 0) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
-        tile.subtitle = when {
-            snapshot.savedAt == 0L -> "Not opened yet"
-            snapshot.blocked > 0 -> "${snapshot.blocked} need you"
-            snapshot.working > 0 -> "${snapshot.working} working"
-            else -> "${snapshot.sessions} sessions"
-        }
+        tile.subtitle = snapshot.summary ?: "Not opened yet"
         tile.updateTile()
     }
 

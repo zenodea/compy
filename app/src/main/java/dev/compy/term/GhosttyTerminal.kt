@@ -49,10 +49,9 @@ class GhosttyTerminal private constructor(private var handle: Long) {
     }
 
     fun clearSelection() = synchronized(lock) { if (handle != 0L) nativeClearSelection(handle) }
-    fun selectionText(): String? = synchronized(lock) { if (handle != 0L) nativeSelectionText(handle) else null }
-    fun title(): String? = synchronized(lock) { if (handle != 0L) nativeTitle(handle) else null }
+    fun selectionText(): String? = synchronized(lock) { if (handle != 0L) nativeSelectionText(handle) else null }?.toString(Charsets.UTF_8)
 
-    fun hyperlinkAt(x: Int, y: Int): String? = synchronized(lock) { if (handle != 0L) nativeHyperlinkAt(handle, x, y) else null }
+    fun hyperlinkAt(x: Int, y: Int): String? = synchronized(lock) { if (handle != 0L) nativeHyperlinkAt(handle, x, y) else null }?.toString(Charsets.UTF_8)
     fun scrollPrompt(delta: Int) = synchronized(lock) { if (handle != 0L) nativeScrollPrompt(handle, delta) }
     fun selectOutputAt(x: Int, y: Int) = synchronized(lock) { handle != 0L && nativeSelectOutputAt(handle, x, y) }
 
@@ -138,9 +137,9 @@ class GhosttyTerminal private constructor(private var handle: Long) {
         @JvmStatic private external fun nativeSelectRange(h: Long, x1: Int, y1: Int, x2: Int, y2: Int): Boolean
         @JvmStatic private external fun nativeSelectWord(h: Long, x: Int, y: Int): Boolean
         @JvmStatic private external fun nativeClearSelection(h: Long)
-        @JvmStatic private external fun nativeSelectionText(h: Long): String?
-        @JvmStatic private external fun nativeTitle(h: Long): String?
-        @JvmStatic private external fun nativeHyperlinkAt(h: Long, x: Int, y: Int): String?
+        // Text comes back as UTF-8 bytes, since JNI's own strings can't carry all of it safely.
+        @JvmStatic private external fun nativeSelectionText(h: Long): ByteArray?
+        @JvmStatic private external fun nativeHyperlinkAt(h: Long, x: Int, y: Int): ByteArray?
         @JvmStatic private external fun nativeScrollPrompt(h: Long, delta: Int)
         @JvmStatic private external fun nativeSelectOutputAt(h: Long, x: Int, y: Int): Boolean
         @JvmStatic private external fun nativeSearch(h: Long, needle: ByteArray): Int

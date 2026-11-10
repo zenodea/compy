@@ -92,6 +92,7 @@ import dev.compy.rex.asWindow
 import dev.compy.rex.SessionSummary
 import dev.compy.rex.SessionView
 import dev.compy.rex.WindowView
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 private const val TAILSCALE_PACKAGE = "com.tailscale.ipn"
@@ -204,7 +205,7 @@ fun Sidebar(
                                 color = scheme.onSurfaceVariant,
                             )
                         }
-                        items(group, key = { "pane-${it.block.id}" }) { row ->
+                        items(group, key = { "pane-${it.connection.config.id}-${it.block.id}" }) { row ->
                             WindowRow(
                                 title = activity.titles[row.block.id] ?: row.window.displayTitle(activity.titles),
                                 subtitle = row.status?.message ?: row.session.label,
@@ -319,6 +320,7 @@ private fun ServerSection(
     val programs by connection.programs.collectAsStateWithLifecycle()
     val folders by connection.folders.collectAsStateWithLifecycle()
     val progress by connection.progress.collectAsStateWithLifecycle()
+    val serverLabel by connection.label.collectAsStateWithLifecycle()
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf(false) }
@@ -336,7 +338,7 @@ private fun ServerSection(
         ) {
             Icon(Icons.Rounded.Laptop, null, Modifier.size(20.dp), tint = scheme.onSurface)
             Column(Modifier.padding(start = 10.dp).weight(1f)) {
-                Text(connection.config.label, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(serverLabel, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val detail = when (val s = state) {
                     ConnectionState.Connected -> null
                     ConnectionState.Connecting -> "Connecting…"
@@ -373,6 +375,8 @@ private fun ServerSection(
                                 importing = hosts.filter { host ->
                                     normalizeServerUrl(host.endpoint, BuildConfig.ALLOW_CLEARTEXT).getOrNull()?.let { it !in known } == true
                                 }
+                            } catch (e: CancellationException) {
+                                throw e
                             } catch (e: Exception) {
                                 onMessage(e.message ?: "Couldn't read this server's hosts")
                             }
@@ -416,7 +420,7 @@ private fun ServerSection(
     importing?.let { hosts ->
         AlertDialog(
             onDismissRequest = { importing = null },
-            title = { Text("Add hosts from ${connection.config.label}") },
+            title = { Text("Add hosts from ${serverLabel}") },
             text = {
                 if (hosts.isEmpty()) {
                     Text("This server has no other hosts to add.")
@@ -440,7 +444,7 @@ private fun ServerSection(
         )
     }
     if (renaming) {
-        RenameDialog("Rename server", connection.config.label, onDismiss = { renaming = false }) {
+        RenameDialog("Rename server", serverLabel, onDismiss = { renaming = false }) {
             renaming = false
             app.renameServer(connection.config.id, it)
         }
@@ -461,7 +465,7 @@ private fun ServerSection(
     if (removing) {
         AlertDialog(
             onDismissRequest = { removing = false },
-            title = { Text("Remove ${connection.config.label}?") },
+            title = { Text("Remove ${serverLabel}?") },
             text = { Text("Compy forgets this server. Its sessions keep running.") },
             confirmButton = {
                 TextButton(onClick = {
@@ -500,6 +504,8 @@ private fun NewSessionDialog(
             try {
                 val id = connection.createSession(name.ifBlank { null })
                 if (id != null) onCreated(connection, id) else onDismiss()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 onMessage(e.message ?: "Couldn't start a session")
                 onDismiss()
@@ -531,7 +537,7 @@ private fun NewSessionDialog(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             RadioButton(serverId == server.config.id, null, Modifier.padding(8.dp))
-                            Text(server.config.label, style = MaterialTheme.typography.bodyMedium)
+                            Text(server.label.collectAsStateWithLifecycle().value, style = MaterialTheme.typography.bodyMedium)
                         }
                     }
                 }
@@ -716,13 +722,18 @@ private fun activityData(servers: List<ServerConnection>, query: String): Activi
             attentionAll += attention
             statusAll += statuses
             programsAll += programs
+            // Rows are keyed by block, and a duplicate key crashes the list. The detached list is
+            // read after the layout, so a pane just placed in a window is briefly in both.
+            val listed = HashSet<String>()
             for (session in sessions) {
                 val view = views[session.id] ?: continue
                 for (window in view.windows) for (block in window.blocks) {
+                    if (!listed.add(block.id)) continue
                     val status = statuses[block.id]
                     rows += PaneRow(connection, session, window, block, status, priorityOf(status, block.id in attention))
                 }
                 for (block in detached[session.id].orEmpty()) {
+                    if (!listed.add(block.id)) continue
                     val status = statuses[block.id]
                     rows += PaneRow(connection, session, block.asWindow(), block, status, priorityOf(status, block.id in attention))
                 }
@@ -730,7 +741,8 @@ private fun activityData(servers: List<ServerConnection>, query: String): Activi
         }
     }
     val filtered = rows.filter {
-        query.isBlank() || it.window.displayTitle(titlesAll).contains(query, true) || it.session.label.contains(query, true) ||
+        // The same title the row shows.
+        query.isBlank() || (titlesAll[it.block.id] ?: it.window.displayTitle(titlesAll)).contains(query, true) || it.session.label.contains(query, true) ||
             it.status?.message?.contains(query, true) == true
     }
     return ActivityData(filtered, statusAll, attentionAll, titlesAll, programsAll)

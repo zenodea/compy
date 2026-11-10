@@ -68,9 +68,12 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     var host: Host? = null
     var interactive = true
         set(value) {
+            val was = field
             field = value
             isFocusable = value
             isFocusableInTouchMode = value
+            // Sizes aren't reported while this is off, so one that changed meanwhile was missed.
+            if (value && !was) reportGrid()
         }
     /** Whether this pane receives typing, which decides how its cursor looks. */
     var paneFocused = false
@@ -283,6 +286,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             canvas.saveLayerAlpha(0f, 0f, width.toFloat(), height.toFloat(), (190 + 65 * t).toInt())
             postInvalidateOnAnimation()
         }
+        blinkOn = (now / BLINK_MS) % 2 == 0L
         val s = scale(cols, rows)
         canvas.save()
         canvas.translate(padding - panX, padTop - panY)
@@ -296,14 +300,17 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         if (softening) canvas.restore()
         drawScrollbar(canvas)
         val blinking = meta[GhosttyTerminal.META_CURSOR_BLINK] != 0 && paneFocused && interactive
-        if (blinking) postOnAnimationDelayed(blinkRunnable, BLINK_MS)
+        if (blinking) {
+            // One pending redraw, at the next change of phase. Every frame used to add its own,
+            // each of which drew a frame that added another, so a burst of output left the view
+            // redrawing constantly for as long as it stayed open.
+            removeCallbacks(blinkRunnable)
+            postOnAnimationDelayed(blinkRunnable, BLINK_MS - now % BLINK_MS)
+        }
         if (!scroller.isFinished) postInvalidateOnAnimation()
     }
 
-    private val blinkRunnable = Runnable {
-        blinkOn = (SystemClock.uptimeMillis() / BLINK_MS) % 2 == 0L
-        invalidate()
-    }
+    private val blinkRunnable = Runnable { invalidate() }
 
     private fun drawRow(canvas: Canvas, y: Int, cols: Int, defaultFg: Int, defaultBg: Int) {
         val top = y * cellH
@@ -532,17 +539,14 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     }
 
     private fun effectiveBg(fg: Int, bg: Int, flags: Int, defaultFg: Int, defaultBg: Int): Int {
-        if (flags and FLAG_SELECTED != 0) return selectionBg(defaultFg, defaultBg)
+        if (flags and FLAG_SELECTED != 0) return defaultFg
         return if (flags and FLAG_INVERSE != 0) (if (fg != 0) fg else defaultFg) else if (bg != 0) bg else defaultBg
     }
 
     private fun effectiveFg(fg: Int, bg: Int, flags: Int, defaultFg: Int, defaultBg: Int): Int {
-        if (flags and FLAG_SELECTED != 0) return selectionFg(defaultBg)
+        if (flags and FLAG_SELECTED != 0) return defaultBg
         return if (flags and FLAG_INVERSE != 0) (if (bg != 0) bg else defaultBg) else if (fg != 0) fg else defaultFg
     }
-
-    private fun selectionBg(defaultFg: Int, defaultBg: Int) = defaultFg
-    private fun selectionFg(defaultBg: Int) = defaultBg
 
     private fun drawCursor(canvas: Canvas, cols: Int, rows: Int, defaultFg: Int, defaultBg: Int) {
         if (!interactive || meta[GhosttyTerminal.META_CURSOR_VISIBLE] == 0) return
@@ -871,6 +875,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         return true
     }
 
+    private var mouseButton = "left"
+
     private fun handleRealMouse(event: MotionEvent): Boolean {
         val col = cellX(event.x)
         val row = cellY(event.y)
@@ -880,9 +886,13 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             else -> "left"
         }
         when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> host?.sendMouse("press", button, col, row)
+            MotionEvent.ACTION_DOWN -> {
+                mouseButton = button
+                host?.sendMouse("press", button, col, row)
+            }
             MotionEvent.ACTION_MOVE -> host?.sendMouse("motion", button, col, row)
-            MotionEvent.ACTION_UP -> host?.sendMouse("release", "left", col, row)
+            // No button is pressed any more by now, so release the one that went down.
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> host?.sendMouse("release", mouseButton, col, row)
         }
         return true
     }
@@ -927,6 +937,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         val terminal = session?.terminal ?: return
         synchronized(terminal.lock) {
             terminal.render(true)
+            // That render took the pending change, so the next draw must not wait for another.
+            haveFrame = false
             val cols = terminal.meta[GhosttyTerminal.META_COLS]
             if (y >= terminal.meta[GhosttyTerminal.META_ROWS]) return
             var left = x
@@ -1048,11 +1060,13 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             override fun onGetContentRect(mode: ActionMode, view: View, outRect: android.graphics.Rect) {
                 val s = scale(meta[GhosttyTerminal.META_COLS], meta[GhosttyTerminal.META_ROWS])
                 val (sx, sy, ex, ey) = ordered()
+                val left = padding - panX
+                val top = padTop - panY
                 outRect.set(
-                    (sx * cellW * s).toInt(),
-                    (sy * cellH * s).toInt(),
-                    ((ex + 1) * cellW * s).toInt(),
-                    ((ey + 1) * cellH * s).toInt(),
+                    (left + sx * cellW * s).toInt(),
+                    (top + sy * cellH * s).toInt(),
+                    (left + (ex + 1) * cellW * s).toInt(),
+                    (top + (ey + 1) * cellH * s).toInt(),
                 )
             }
         }, ActionMode.TYPE_FLOATING)
@@ -1064,6 +1078,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         session = null
         actionMode?.finish()
         removeCallbacks(blinkRunnable)
+        removeCallbacks(flingRunnable)
+        scroller.forceFinished(true)
     }
 
     companion object {

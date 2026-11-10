@@ -2,7 +2,6 @@ package dev.compy.ui
 
 import android.Manifest
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
@@ -78,8 +77,12 @@ import java.util.concurrent.TimeUnit
 internal fun normalizeServerUrl(input: String, allowCleartext: Boolean): Result<String> {
     val trimmed = input.trim().trimEnd('/')
     if (trimmed.isEmpty()) return Result.failure(IllegalArgumentException("Enter the server's address"))
-    val withScheme = if ("://" in trimmed) trimmed else "https://$trimmed"
-    val scheme = withScheme.substringBefore("://").lowercase()
+    val typed = if ("://" in trimmed) trimmed else "https://$trimmed"
+    val scheme = typed.substringBefore("://").lowercase()
+    val rest = typed.substringAfter("://")
+    // Only a scheme, such as "https://", which trimming the slashes turned into a host name.
+    if (rest.isBlank() || trimmed.endsWith(":")) return Result.failure(IllegalArgumentException("Enter the server's address"))
+    val withScheme = "$scheme://$rest"
     return when {
         scheme == "https" -> Result.success(withScheme)
         scheme == "http" && allowCleartext -> Result.success(withScheme)
@@ -107,7 +110,8 @@ fun AddServerScreen(app: AppState, canGoBack: Boolean, onDone: () -> Unit) {
     var label by rememberSaveable { mutableStateOf("") }
     var scanning by rememberSaveable { mutableStateOf(false) }
     var error by rememberSaveable { mutableStateOf<String?>(null) }
-    var testing by rememberSaveable { mutableStateOf(false) }
+    // Not saved: restored as true with no test running, it would leave the button off for good.
+    var testing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     if (canGoBack) BackHandler(onBack = onDone)
     val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -117,6 +121,11 @@ fun AddServerScreen(app: AppState, canGoBack: Boolean, onDone: () -> Unit) {
     fun connect(input: String) {
         val url = normalizeServerUrl(input, BuildConfig.ALLOW_CLEARTEXT).getOrElse {
             error = it.message
+            return
+        }
+        // Two copies of one server list the same panes twice, which the activity list can't show.
+        if (app.servers.value.any { it.url.equals(url, ignoreCase = true) }) {
+            error = "That server is already in Compy"
             return
         }
         error = null
@@ -165,6 +174,10 @@ fun AddServerScreen(app: AppState, canGoBack: Boolean, onDone: () -> Unit) {
         if (scanning) {
             QrScanner(
                 Modifier.fillMaxWidth().height(300.dp).clip(RoundedCornerShape(18.dp)),
+                onFailed = {
+                    scanning = false
+                    error = "Compy couldn't start the camera. You can type the address instead."
+                },
                 onCode = { code ->
                     scanning = false
                     address = code
@@ -236,19 +249,33 @@ private fun explain(context: Context, url: String, error: Throwable): String {
 }
 
 @Composable
-private fun QrScanner(modifier: Modifier, onCode: (String) -> Unit) {
+private fun QrScanner(modifier: Modifier, onFailed: () -> Unit, onCode: (String) -> Unit) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
     val latest = rememberUpdated(onCode)
-    DisposableEffect(Unit) { onDispose { executor.shutdown() } }
+    val latestFailed = rememberUpdated(onFailed)
+    val cameras = remember { ProcessCameraProvider.getInstance(context) }
+    DisposableEffect(Unit) {
+        onDispose {
+            // The camera is bound to the activity, so it kept running after the scanner closed.
+            // Listeners run in the order added, so this also undoes a bind that is yet to happen.
+            cameras.addListener({
+                runCatching { cameras.get().unbindAll() }
+                executor.shutdown()
+            }, ContextCompat.getMainExecutor(context))
+        }
+    }
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
             val preview = PreviewView(ctx)
-            val future = ProcessCameraProvider.getInstance(ctx)
-            future.addListener({
-                val provider = future.get()
+            cameras.addListener({
+                val provider = runCatching { cameras.get() }.getOrNull()
+                if (provider == null) {
+                    latestFailed.value()
+                    return@addListener
+                }
                 val usecase = Preview.Builder().build().also { it.surfaceProvider = preview.surfaceProvider }
                 val reader = MultiFormatReader().apply {
                     setHints(mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)))
@@ -270,8 +297,12 @@ private fun QrScanner(modifier: Modifier, onCode: (String) -> Unit) {
                             }
                         }
                     }
-                provider.unbindAll()
-                provider.bindToLifecycle(lifecycle, CameraSelector.DEFAULT_BACK_CAMERA, usecase, analysis)
+                // The camera is optional in the manifest, so there may be none, or only a front one.
+                runCatching {
+                    val camera = if (provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)) CameraSelector.DEFAULT_BACK_CAMERA else CameraSelector.DEFAULT_FRONT_CAMERA
+                    provider.unbindAll()
+                    provider.bindToLifecycle(lifecycle, camera, usecase, analysis)
+                }.onFailure { latestFailed.value() }
             }, ContextCompat.getMainExecutor(ctx))
             preview
         },

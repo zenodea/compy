@@ -21,6 +21,15 @@ class ServerUrlTest {
         assertTrue(normalizeServerUrl("unix:///tmp/rex.sock", true).isFailure)
     }
 
+    @Test fun refusesASchemeWithNoHost() {
+        assertTrue(normalizeServerUrl("https://", false).isFailure)
+        assertTrue(normalizeServerUrl("  ", false).isFailure)
+    }
+
+    @Test fun lowersTheScheme() {
+        assertEquals("https://Rex.ts.net", normalizeServerUrl("HTTPS://Rex.ts.net", false).getOrThrow())
+    }
+
     @Test fun namesServersFromTheirHost() {
         assertEquals("rex", defaultLabel("https://rex.tail1234.ts.net"))
         assertEquals("10.0.2.2", defaultLabel("http://10.0.2.2:18765"))

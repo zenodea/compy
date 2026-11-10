@@ -6,6 +6,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
+import android.os.SystemClock
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -25,6 +26,7 @@ import dev.compy.rex.TerminalColors
 import dev.compy.term.TerminalFonts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.coroutineScope
@@ -44,6 +46,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
@@ -131,9 +134,10 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
         }
         scope.launch { servers.map { it.isNotEmpty() }.distinctUntilChanged().drop(1).collect { if (_foreground.value) syncService() } }
         scope.launch {
-            settings.collect { s ->
-                val font = s.customFontPath?.let { TerminalFonts.fromFile(context, File(it)) } ?: TerminalFonts.bundled(context)
-                if (_fonts.value !== font) _fonts.value = font
+            // Only when the font changes: any other setting saved, such as the session last opened,
+            // would read the font file again and make every terminal measure itself.
+            settings.map { it.customFontPath }.distinctUntilChanged().collect { path ->
+                _fonts.value = path?.let { TerminalFonts.fromFile(context, File(it)) } ?: TerminalFonts.bundled(context)
             }
         }
         ProcessLifecycleOwner.get().lifecycle.addObserver(this)
@@ -143,7 +147,7 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
                 coroutineScope {
                     map.values.forEach { c ->
                         settings.value.hostThemes[c.config.id]?.let { c.seedHostTheme(it.toColors()) }
-                        hostThemeRevision.value++
+                        hostThemeRevision.update { it + 1 }
                         launch { watchHost(c) }
                     }
                 }
@@ -170,7 +174,7 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
         context.getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(
             object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
-                    if (_foreground.value || settings.value.backgroundAlerts) {
+                    if (_foreground.value || watching) {
                         _connections.value.values.forEach { it.retryNow() }
                     }
                 }
@@ -182,12 +186,13 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
         val current = _connections.value
         val next = saved.associate { s ->
             val existing = current[s.id]
-            s.id to if (existing != null && existing.config.url == s.url && existing.config.label == s.label) {
-                existing
+            s.id to if (existing != null && existing.config.url == s.url) {
+                // Only a new address needs a new connection.
+                existing.also { it.rename(s.label) }
             } else {
                 existing?.shutdown()
                 ServerConnection(
-                    ServerConfig(s.id, s.label, s.url), http, scope,
+                    ServerConfig(s.id, s.url), s.label, http, scope,
                     clientLabel = Build.MODEL ?: "Android",
                     clientVersion = BuildConfigVersion,
                 ).also {
@@ -203,7 +208,7 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
     private suspend fun watchHost(c: ServerConnection) = coroutineScope {
         launch {
             c.hostTheme.filterNotNull().collect { colors ->
-                hostThemeRevision.value++
+                hostThemeRevision.update { it + 1 }
                 val saved = colors.toSaved()
                 if (settings.value.hostThemes[c.config.id] != saved) {
                     updateSettings { it.copy(hostThemes = it.hostThemes + (c.config.id to saved)) }
@@ -235,7 +240,12 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
     /** Called by the background service when it starts and stops. */
     fun setWatching(active: Boolean) {
         watching = active
-        if (active) _connections.value.values.forEach { it.connect() }
+        if (active) {
+            _connections.value.values.forEach { it.connect() }
+        } else if (!_foreground.value) {
+            // Stopped from its notification with the app closed: nothing is left to keep these open for.
+            _connections.value.values.forEach { it.pause() }
+        }
     }
 
     /** Opens a specific pane, such as from a notification, once its server is connected. */
@@ -284,6 +294,10 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
         _openRequests.tryEmit(selection)
     }
 
+    /** Forgets the last request, which is kept for a screen that wasn't there yet to receive it. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun openRequestHandled() = _openRequests.resetReplayCache()
+
     /** Keeps the launcher's long-press menu pointing at recently used windows. */
     fun recordRecent(serverId: String, sessionId: String, title: String) {
         Shortcuts.publish(context, serverId, sessionId, title)
@@ -300,7 +314,9 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
     }
 
     fun removeServer(id: String) {
-        if (_selection.value?.serverId == id) _selection.value = null
+        // Through select, so the next launch doesn't reopen a session on a server that's gone.
+        if (_selection.value?.serverId == id) select(null)
+        updateSettings { it.copy(hostThemes = it.hostThemes - id) }
         scope.launch { store.updateServers { list -> list.filterNot { it.id == id } } }
     }
 
@@ -315,8 +331,10 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
     override fun onStart(owner: LifecycleOwner) {
         _foreground.value = true
         pauseJob?.cancel()
-        val away = System.currentTimeMillis() - leftAt
-        if (leftAt != 0L && away > LOCK_AFTER_MS) _locked.value = true
+        val away = SystemClock.elapsedRealtime() - leftAt
+        // Only with the lock on. Otherwise this stays set, and turning the lock on later in
+        // Settings would lock the app on the spot.
+        if (settings.value.biometricLock && leftAt != 0L && away > LOCK_AFTER_MS) _locked.value = true
         _connections.value.values.forEach {
             it.retryNow()
             it.resumeStreams()
@@ -327,11 +345,14 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
 
     override fun onStop(owner: LifecycleOwner) {
         _foreground.value = false
-        leftAt = System.currentTimeMillis()
+        // Not the wall clock, which setting the time back would turn into never having left.
+        leftAt = SystemClock.elapsedRealtime()
         AppIcons.applyChoice(context)
         // Give terminal sizes back straight away so other devices reflow, but keep the sockets for
         // a moment, because switching apps briefly is common.
-        pauseJob = scope.launch {
+        // On the main thread, where onStart cancels it. Elsewhere the cancel could arrive after
+        // the wait ended, and returning at that moment left every server paused.
+        pauseJob = scope.launch(Dispatchers.Main) {
             _connections.value.values.forEach { runCatching { it.releaseAllOwnership() } }
             delay(PAUSE_AFTER_MS)
             _connections.value.values.forEach { if (watching) it.pauseStreams() else it.pause() }

@@ -250,6 +250,9 @@ fun PaneArea(
                 key(placed.split.splitId) {
                     SplitHandle(placed, dragging, onDrag = { ratio ->
                         overrides[placed.split.splitId] = ratio
+                    }, onCancel = {
+                        // Nothing was sent, so nothing will come back to clear it.
+                        overrides.remove(placed.split.splitId)
                     }, onRelease = { ratio ->
                         controller.connection.resizePane(
                             controller.sessionId, placed.split.horizontal,
@@ -691,8 +694,14 @@ private fun SplitHandle(
     placed: PlacedSplit,
     dragging: Boolean,
     onDrag: (Float) -> Unit,
+    onCancel: () -> Unit,
     onRelease: (Float) -> Unit,
 ) {
+    // The gesture below starts once per split, so it reads these through state to get the current
+    // panes on either side rather than the ones from when it started.
+    val latestDrag = rememberUpdated(onDrag)
+    val latestCancel = rememberUpdated(onCancel)
+    val latestRelease = rememberUpdated(onRelease)
     val rect = placed.rect
     val horizontal = placed.split.horizontal
     var ratio by remember(placed.split.splitId) { mutableStateOf(placed.ratio) }
@@ -730,14 +739,17 @@ private fun SplitHandle(
                     onDragStart = { active = true },
                     onDragEnd = {
                         active = false
-                        onRelease(ratio)
+                        latestRelease.value(ratio)
                     },
-                    onDragCancel = { active = false },
+                    onDragCancel = {
+                        active = false
+                        latestCancel.value()
+                    },
                 ) { change, amount ->
                     change.consume()
                     val delta = (if (horizontal) amount.x else amount.y) / span
                     ratio = (ratio + delta).coerceIn(0.1f, 0.9f)
-                    onDrag(ratio)
+                    latestDrag.value(ratio)
                 }
             },
         contentAlignment = Alignment.Center,
@@ -1091,7 +1103,7 @@ fun TerminalPane(
                 view.tag.let { if (it !== fonts) { view.tag = fonts; view.fontsChanged() } }
             },
             onRelease = { view ->
-                controller.unregister(blockId)
+                controller.unregister(blockId, view)
                 view.bind(null)
             },
         )

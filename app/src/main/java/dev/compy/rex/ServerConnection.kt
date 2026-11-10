@@ -13,9 +13,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -35,11 +35,14 @@ sealed interface ConnectionState {
     data class Offline(val reason: String) : ConnectionState
 }
 
-/** Something a program wants the person to know, with where to find it. */
-data class Alert(val serverId: String, val sessionId: String, val blockId: String, val text: String)
+/**
+ * Something a program wants the person to know, with where to find it. [always] is for a failure
+ * to report, which is shown even to someone already looking at the pane it came from.
+ */
+data class Alert(val serverId: String, val sessionId: String, val blockId: String, val text: String, val always: Boolean = false)
 
-/** A saved server's address and name. */
-data class ServerConfig(val id: String, val label: String, val url: String)
+/** A saved server's address. Its name is [ServerConnection.label], which can change. */
+data class ServerConfig(val id: String, val url: String)
 
 /**
  * Everything Compy knows about one Rex server, kept current from its event stream, plus the calls
@@ -47,11 +50,21 @@ data class ServerConfig(val id: String, val label: String, val url: String)
  */
 class ServerConnection(
     val config: ServerConfig,
+    label: String,
     private val http: OkHttpClient,
     private val scope: CoroutineScope,
     private val clientLabel: String,
     private val clientVersion: String,
 ) {
+    private val _label = MutableStateFlow(label)
+    /** The name the person gave this server. */
+    val label: StateFlow<String> = _label.asStateFlow()
+
+    /** Takes a new name without reconnecting, which would drop every terminal and its scrollback. */
+    fun rename(label: String) {
+        _label.value = label
+    }
+
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Connecting)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
 
@@ -121,12 +134,12 @@ class ServerConnection(
     val bells: SharedFlow<String> = _bells.asSharedFlow()
 
     @Volatile private var control: RexControl? = null
-    private var reconnectToken: String? = null
+    @Volatile private var reconnectToken: String? = null
     private var connectJob: Job? = null
     /** The control connection being opened or in use. Closes reported by any other are stale. */
     @Volatile private var attempt: RexControl? = null
     private val connectLock = Any()
-    private var retries = 0
+    @Volatile private var retries = 0
     @Volatile private var wanted = false
 
     private val attached = ConcurrentHashMap.newKeySet<String>()
@@ -189,14 +202,9 @@ class ServerConnection(
 
     /** Sends a reply typed in a notification to a pane, followed by Enter. */
     suspend fun sendReply(sessionId: String, blockId: String, text: String) {
-        val c = control ?: throw RexError("disconnected", "Not connected to ${config.label}", 0)
+        val c = control ?: throw RexError("disconnected", "Not connected to ${_label.value}", 0)
         ensureAttached(sessionId)
-        c.call("block.event", ids(sessionId, blockId) {
-            put("event", buildJsonObject {
-                put("type", "paste")
-                put("payload", buildJsonObject { put("text", text) })
-            })
-        })
+        c.call("block.event", pasteEvent(sessionId, blockId, text))
         c.call("client.key", ids(sessionId, blockId) { put("key", RexKey.ENTER.toJson()) })
     }
 
@@ -204,6 +212,15 @@ class ServerConnection(
     fun shutdown() {
         wanted = false
         connectJob?.cancel()
+        learnJob?.cancel()
+        viewFetches.values.forEach { it.cancel() }
+        viewFetches.clear()
+        synchronized(holdLock) {
+            idleJobs.values.forEach { it.cancel() }
+            idleJobs.clear()
+            idle.clear()
+            holds.clear()
+        }
         terminals.values.forEach { it.stop() }
         terminals.clear()
         attempt = null
@@ -404,13 +421,7 @@ class ServerConnection(
 
     private suspend fun readStatus(sessionId: String, blockId: String) {
         try {
-            val result = control?.call(
-                "com.superlogical.terminal.program_status",
-                buildJsonObject {
-                    put("session_id", sessionId)
-                    put("block_id", blockId)
-                },
-            ).obj()
+            val result = control?.call("com.superlogical.terminal.program_status", ids(sessionId, blockId)).obj()
             val records = result?.get("records").arr().orEmpty().mapNotNull { parseStatusRecord(it) }
             setStatus(blockId, mostUrgent(records))
         } catch (_: Exception) {
@@ -420,13 +431,7 @@ class ServerConnection(
 
     private suspend fun readFolder(sessionId: String, blockId: String) {
         val result = runCatching {
-            control?.call(
-                "com.superlogical.terminal.pwd",
-                buildJsonObject {
-                    put("session_id", sessionId)
-                    put("block_id", blockId)
-                },
-            ).obj()
+            control?.call("com.superlogical.terminal.pwd", ids(sessionId, blockId)).obj()
         }.getOrNull()
         setFolder(blockId, result?.get("pwd").str())
     }
@@ -438,13 +443,7 @@ class ServerConnection(
 
     private suspend fun readProcess(sessionId: String, blockId: String) {
         val result = runCatching {
-            control?.call(
-                "com.superlogical.terminal.process",
-                buildJsonObject {
-                    put("session_id", sessionId)
-                    put("block_id", blockId)
-                },
-            ).obj()
+            control?.call("com.superlogical.terminal.process", ids(sessionId, blockId)).obj()
         }.getOrNull()
         setProgram(blockId, result?.get("foreground").obj())
     }
@@ -460,13 +459,7 @@ class ServerConnection(
 
     private suspend fun readTitle(sessionId: String, blockId: String) {
         val result = runCatching {
-            control?.call(
-                "com.superlogical.terminal.title",
-                buildJsonObject {
-                    put("session_id", sessionId)
-                    put("block_id", blockId)
-                },
-            ).obj()
+            control?.call("com.superlogical.terminal.title", ids(sessionId, blockId)).obj()
         }.getOrNull()
         val title = result?.get("title").str()?.takeIf { it.isNotBlank() } ?: return
         _titles.update { it + (blockId to title) }
@@ -492,6 +485,7 @@ class ServerConnection(
                 _views.update { it - id }
                 _detached.update { it - id }
                 attached -= id
+                viewFetches.remove(id)?.cancel()
             }
             "session_moved" -> scope.launch {
                 val result = runCatching { control?.call("session.list") }.getOrNull().obj()
@@ -559,9 +553,12 @@ class ServerConnection(
                 val id = payload?.get("block_id").str() ?: return
                 _statuses.update { it - id }
                 _attention.update { it - id }
+                _titles.update { it - id }
                 _programs.update { it - id }
                 _folders.update { it - id }
                 _progress.update { it - id }
+                statusRead -= id
+                owned.remove(id)
                 _detached.update { map ->
                     val left = map[sessionId]?.filterNot { it.id == id } ?: return@update map
                     if (left.isEmpty()) map - sessionId else map + (sessionId to left)
@@ -583,14 +580,7 @@ class ServerConnection(
                 setStatus(block, status)
                 if (status.isDone || status.isBlocked || status.isError) markAttention(block)
                 if (status.isBlocked && previous?.isBlocked != true) {
-                    val who = status.app ?: "A program"
-                    val what = when (status.kind) {
-                        "permission" -> "needs your permission"
-                        "question" -> "has a question"
-                        "auth" -> "needs a password"
-                        else -> "needs you"
-                    }
-                    _alerts.tryEmit(Alert(config.id, sessionId, block, "$who $what"))
+                    _alerts.tryEmit(Alert(config.id, sessionId, block, "${status.app ?: "A program"} ${status.blockedReason}"))
                 }
             }
             "program_status_removed" -> setStatus(block, null)
@@ -633,14 +623,14 @@ class ServerConnection(
 
     private suspend fun readLargeCopy(sessionId: String, blockId: String, id: Long?, bytes: Long) {
         if (bytes > MAX_CLIPBOARD_BYTES) {
-            _alerts.tryEmit(Alert(config.id, sessionId, blockId, "That copy is too large for Android's clipboard (${bytes / 1024} KB)"))
+            _alerts.tryEmit(Alert(config.id, sessionId, blockId, "That copy is too large for Android's clipboard (${bytes / 1024} KB)", always = true))
             return
         }
         val text = runCatching { readCopy(sessionId, blockId, id) }.getOrNull()
         if (text != null) {
             _clipboard.tryEmit(text)
         } else {
-            _alerts.tryEmit(Alert(config.id, sessionId, blockId, "Couldn't copy that text from the server"))
+            _alerts.tryEmit(Alert(config.id, sessionId, blockId, "Couldn't copy that text from the server", always = true))
         }
     }
 
@@ -786,13 +776,21 @@ class ServerConnection(
     /** Pastes into a block that may not be on screen, attaching to its session first. */
     fun pasteInto(sessionId: String, blockId: String, text: String, onError: (String) -> Unit = {}) = act(onError) { c ->
         ensureAttached(sessionId)
-        c.call("block.event", ids(sessionId, blockId) {
-            put("event", buildJsonObject {
-                put("type", "paste")
-                put("payload", buildJsonObject { put("text", text) })
-            })
-        })
+        c.call("block.event", pasteEvent(sessionId, blockId, text))
     }
+
+    private fun pasteEvent(sessionId: String, blockId: String, text: String) = blockEvent(sessionId, blockId, "paste") { put("text", text) }
+
+    private fun blockEvent(sessionId: String, blockId: String, type: String, payload: JsonObject) =
+        ids(sessionId, blockId) {
+            put("event", buildJsonObject {
+                put("type", type)
+                put("payload", payload)
+            })
+        }
+
+    private fun blockEvent(sessionId: String, blockId: String, type: String, payload: JsonObjectBuilder.() -> Unit) =
+        blockEvent(sessionId, blockId, type, buildJsonObject(payload))
 
     private fun ids(sessionId: String, blockId: String, extra: JsonObjectBuilder.() -> Unit = {}) =
         buildJsonObject {
@@ -810,13 +808,15 @@ class ServerConnection(
         scope.launch {
             val c = control
             if (c == null) {
-                onError("Not connected to ${config.label}")
+                onError("Not connected to ${_label.value}")
                 return@launch
             }
             try {
                 block(c)
             } catch (e: TimeoutCancellationException) {
                 onError(SLOW_ANSWER)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 onError(e.message ?: "That didn't work")
             }
@@ -830,76 +830,47 @@ class ServerConnection(
     }
 
     fun paste(sessionId: String, blockId: String, text: String) {
-        fire("block.event", ids(sessionId, blockId) {
-            put("event", buildJsonObject {
-                put("type", "paste")
-                put("payload", buildJsonObject { put("text", text) })
-            })
-        })
+        fire("block.event", pasteEvent(sessionId, blockId, text))
     }
 
     fun sendFocus(sessionId: String, blockId: String, focused: Boolean) {
-        fire("block.event", ids(sessionId, blockId) {
-            put("event", buildJsonObject {
-                put("type", "focus")
-                put("payload", buildJsonObject { put("action", if (focused) "in" else "out") })
-            })
-        })
+        fire("block.event", blockEvent(sessionId, blockId, "focus") { put("action", if (focused) "in" else "out") })
     }
 
     fun sendMouse(sessionId: String, blockId: String, payload: JsonObject) {
-        fire("block.event", ids(sessionId, blockId) {
-            put("event", buildJsonObject {
-                put("type", "mouse")
-                put("payload", payload)
-            })
-        })
+        fire("block.event", blockEvent(sessionId, blockId, "mouse", payload))
     }
 
     fun sendWheel(sessionId: String, blockId: String, payload: JsonObject) {
-        fire("block.event", ids(sessionId, blockId) {
-            put("event", buildJsonObject {
-                put("type", "wheel")
-                put("payload", payload)
-            })
-        })
+        fire("block.event", blockEvent(sessionId, blockId, "wheel", payload))
     }
 
     // Size and ownership.
 
+    private suspend fun resize(c: RexControl, sessionId: String, blockId: String, cols: Int, rows: Int, cellW: Int, cellH: Int) {
+        ensureAttached(sessionId)
+        c.call(
+            "com.superlogical.terminal.resize",
+            ids(sessionId, blockId) {
+                put("args", buildJsonObject {
+                    put("columns", cols)
+                    put("rows", rows)
+                    put("cell_width_px", cellW.coerceIn(1, 65535))
+                    put("cell_height_px", cellH.coerceIn(1, 65535))
+                })
+            },
+        )
+    }
+
     fun requestSize(sessionId: String, blockId: String, cols: Int, rows: Int, cellW: Int, cellH: Int) {
-        act { c ->
-            ensureAttached(sessionId)
-            c.call(
-                "com.superlogical.terminal.resize",
-                ids(sessionId, blockId) {
-                    put("args", buildJsonObject {
-                        put("columns", cols)
-                        put("rows", rows)
-                        put("cell_width_px", cellW.coerceIn(1, 65535))
-                        put("cell_height_px", cellH.coerceIn(1, 65535))
-                    })
-                },
-            )
-        }
+        act { c -> resize(c, sessionId, blockId, cols, rows, cellW, cellH) }
     }
 
     /** Fits a block to this screen: asks for the size, then takes ownership so it applies now. */
     fun fitBlock(sessionId: String, blockId: String, cols: Int, rows: Int, cellW: Int, cellH: Int) {
         owned[blockId] = sessionId
         act { c ->
-            ensureAttached(sessionId)
-            c.call(
-                "com.superlogical.terminal.resize",
-                ids(sessionId, blockId) {
-                    put("args", buildJsonObject {
-                        put("columns", cols)
-                        put("rows", rows)
-                        put("cell_width_px", cellW.coerceIn(1, 65535))
-                        put("cell_height_px", cellH.coerceIn(1, 65535))
-                    })
-                },
-            )
+            resize(c, sessionId, blockId, cols, rows, cellW, cellH)
             c.call("session.own_block", blockIdList(sessionId, listOf(blockId)) { put("mode", "take") })
         }
     }
@@ -942,7 +913,7 @@ class ServerConnection(
     }
 
     suspend fun createSession(label: String?): String? {
-        val c = control ?: throw RexError("disconnected", "Not connected to ${config.label}", 0)
+        val c = control ?: throw RexError("disconnected", "Not connected to ${_label.value}", 0)
         val result = c.call(
             "session.create",
             buildJsonObject {
@@ -1005,7 +976,7 @@ class ServerConnection(
      * if it isn't in any window, which only the list of detached panes can show.
      */
     suspend fun revealBlock(sessionId: String, blockId: String): Boolean {
-        val c = control ?: throw RexError("disconnected", "Not connected to ${config.label}", 0)
+        val c = control ?: throw RexError("disconnected", "Not connected to ${_label.value}", 0)
         ensureAttached(sessionId)
         val view = parseView(c.call("session.view", buildJsonObject { put("session_id", sessionId) }))
         val window = view?.windowOf(blockId) ?: return false
@@ -1209,7 +1180,7 @@ class ServerConnection(
         args: JsonObject,
         timeoutMs: Long = 15_000,
     ): JsonObject? {
-        val c = control ?: throw RexError("disconnected", "Not connected to ${config.label}", 0)
+        val c = control ?: throw RexError("disconnected", "Not connected to ${_label.value}", 0)
         ensureAttached(sessionId)
         val result = c.call(
             "client.action",
@@ -1229,7 +1200,7 @@ class ServerConnection(
      */
     suspend fun upload(sessionId: String, blockId: String, files: List<UploadFile>, onProgress: (Long, Long) -> Unit = { _, _ -> }) {
         if (files.isEmpty()) return
-        val c = control ?: throw RexError("disconnected", "Not connected to ${config.label}", 0)
+        val c = control ?: throw RexError("disconnected", "Not connected to ${_label.value}", 0)
         if (apiRevision < UPLOAD_API_REVISION) throw RexError("not_supported", uploadRefusal(RexError("method_not_found", "", 0)), 0)
         ensureAttached(sessionId)
         val total = files.sumOf { it.size }
@@ -1265,18 +1236,20 @@ class ServerConnection(
                 }
             }
             for (stream in streams) {
-                val (code, reason) = withTimeout(UPLOAD_FINISH_MS) { stream.result() }
+                val (code, reason) = withTimeoutOrNull(UPLOAD_FINISH_MS) { stream.result() }
+                    ?: throw RexError("timeout", "The server didn't confirm the upload in time", 0)
                 if (code != 1000) throw RexError("upload_failed", "The upload didn't finish: ${reason.ifEmpty { "code $code" }}", 0)
             }
         } finally {
             streams.forEach { it.cancel() }
+            files.forEach { runCatching { it.discard() } }
         }
     }
 
     private fun uploadRefusal(e: RexError): String = when (e.code) {
-        "method_not_found", "not_found" -> "${config.label} runs a Rex too old for uploads. Update Rex there and restart its server."
-        "too_large" -> "That's more than ${config.label} accepts in one upload"
-        "conflict" -> "${config.label} is busy with other uploads. Try again in a moment."
+        "method_not_found", "not_found" -> "${_label.value} runs a Rex too old for uploads. Update Rex there and restart its server."
+        "too_large" -> "That's more than ${_label.value} accepts in one upload"
+        "conflict" -> "${_label.value} is busy with other uploads. Try again in a moment."
         else -> e.message ?: "The server refused the upload"
     }
 

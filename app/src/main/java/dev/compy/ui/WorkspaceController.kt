@@ -17,6 +17,7 @@ import dev.compy.rex.RexKey
 import dev.compy.rex.ServerConnection
 import dev.compy.rex.TranscriptFeed
 import dev.compy.term.TerminalView
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -37,7 +38,6 @@ class WorkspaceController(
     private val views = HashMap<String, TerminalView>()
     private val grids = HashMap<String, Grid>()
     private val sizeJobs = HashMap<String, Job>()
-    private val visibleBlocks = HashSet<String>()
     private val fitted = HashMap<String, Grid>()
     private var sizesHeld = false
 
@@ -50,6 +50,11 @@ class WorkspaceController(
     /** The conversation of the agent in a pane, kept while the session is open so switching back is instant. */
     fun feed(blockId: String): TranscriptFeed = feeds.getOrPut(blockId) { TranscriptFeed(connection, sessionId, blockId) }
 
+    /** Forgets the conversations of panes that have closed. Each holds its entries and up to 16 MB of images. */
+    fun keepFeeds(open: Set<String>) {
+        feeds.keys.retainAll(open)
+    }
+
     /** Modifiers latched on the key bar, as RexKey bit flags. */
     var stickyMods by mutableIntStateOf(0)
         private set
@@ -59,12 +64,16 @@ class WorkspaceController(
 
     fun register(blockId: String, view: TerminalView) {
         views[blockId] = view
-        visibleBlocks += blockId
     }
 
-    fun unregister(blockId: String) {
+    /**
+     * A block can briefly have two views, such as while a floating pane zooms into the grid, and
+     * the old one leaves after the new one arrived. Only the view still registered may take the
+     * block's state with it, or typing would go to whichever other pane came first.
+     */
+    fun unregister(blockId: String, view: TerminalView) {
+        if (views[blockId] !== view) return
         views.remove(blockId)
-        visibleBlocks -= blockId
         grids.remove(blockId)
         fitted.remove(blockId)
         sizeJobs.remove(blockId)?.cancel()
@@ -207,7 +216,8 @@ class WorkspaceController(
         }
         // Layout changes and pinching report many sizes in a row; only the last one matters.
         sizeJobs[blockId]?.cancel()
-        sizeJobs[blockId] = app.scope.launch {
+        // On the main thread, like everything else that touches these maps.
+        sizeJobs[blockId] = app.scope.launch(Dispatchers.Main) {
             delay(SIZE_DEBOUNCE_MS)
             fitted[blockId] = grid
             connection.fitBlock(sessionId, blockId, grid.cols, grid.rows, grid.cellW, grid.cellH)

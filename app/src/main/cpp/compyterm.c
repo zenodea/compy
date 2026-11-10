@@ -32,15 +32,42 @@ static inline jint rgb(GhosttyColorRgb c) {
  * be far larger, and every pane Compy keeps warm holds its scrollback in memory. */
 #define SCROLLBACK_MAX_BYTES ((size_t)8 * 1024 * 1024)
 
+/* Frees a handle and everything it owns. Every ghostty free accepts NULL. */
+static void destroy(Term* h) {
+  if (!h) return;
+  ghostty_search_free(h->search);
+  ghostty_render_state_row_cells_free(h->cells);
+  ghostty_render_state_row_iterator_free(h->rows);
+  ghostty_render_state_free(h->rs);
+  ghostty_terminal_free(h->term);
+  free(h);
+}
+
+/* Takes ownership of the terminal. NULL, with the terminal freed, when memory runs out. */
 static Term* wrap(GhosttyTerminal t) {
   Term* h = calloc(1, sizeof(Term));
+  if (!h) {
+    ghostty_terminal_free(t);
+    return NULL;
+  }
   h->term = t;
   const size_t max_scrollback = SCROLLBACK_MAX_BYTES;
   ghostty_terminal_set(t, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &max_scrollback);
-  ghostty_render_state_new(NULL, &h->rs);
-  ghostty_render_state_row_iterator_new(NULL, &h->rows);
-  ghostty_render_state_row_cells_new(NULL, &h->cells);
+  if (ghostty_render_state_new(NULL, &h->rs) != GHOSTTY_SUCCESS ||
+      ghostty_render_state_row_iterator_new(NULL, &h->rows) != GHOSTTY_SUCCESS ||
+      ghostty_render_state_row_cells_new(NULL, &h->cells) != GHOSTTY_SUCCESS) {
+    destroy(h);
+    return NULL;
+  }
   return h;
+}
+
+/* Copies bytes into a new Java array, which Kotlin decodes as UTF-8. NewStringUTF wants modified
+ * UTF-8 instead, so text from a program, such as an emoji or a cut-off sequence, isn't safe in it. */
+static jbyteArray to_bytes(JNIEnv* env, const uint8_t* data, size_t len) {
+  jbyteArray out = (*env)->NewByteArray(env, (jsize)len);
+  if (out) (*env)->SetByteArrayRegion(env, out, 0, (jsize)len, (const jbyte*)data);
+  return out;
 }
 
 JNIEXPORT jlong JNICALL Java_dev_compy_term_GhosttyTerminal_nativeNew(
@@ -52,7 +79,9 @@ JNIEXPORT jlong JNICALL Java_dev_compy_term_GhosttyTerminal_nativeNew(
 
 JNIEXPORT jlong JNICALL Java_dev_compy_term_GhosttyTerminal_nativeDecodeSnapshot(
     JNIEnv* env, jclass cls, jbyteArray data, jint len) {
+  if (len < 0 || len > (*env)->GetArrayLength(env, data)) return 0;
   jbyte* bytes = (*env)->GetByteArrayElements(env, data, NULL);
+  if (!bytes) return 0;
   GhosttySnapshotDecoder d = NULL;
   GhosttyTerminal t = NULL;
   GhosttyResult r = ghostty_snapshot_decoder_new_buf(NULL, &d, (const uint8_t*)bytes, (size_t)len);
@@ -69,20 +98,15 @@ JNIEXPORT jlong JNICALL Java_dev_compy_term_GhosttyTerminal_nativeDecodeSnapshot
 
 JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeFree(
     JNIEnv* env, jclass cls, jlong handle) {
-  Term* h = (Term*)(intptr_t)handle;
-  if (!h) return;
-  if (h->search) ghostty_search_free(h->search);
-  ghostty_render_state_row_cells_free(h->cells);
-  ghostty_render_state_row_iterator_free(h->rows);
-  ghostty_render_state_free(h->rs);
-  ghostty_terminal_free(h->term);
-  free(h);
+  destroy((Term*)(intptr_t)handle);
 }
 
 JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeWrite(
     JNIEnv* env, jclass cls, jlong handle, jbyteArray data, jint off, jint len) {
   Term* h = (Term*)(intptr_t)handle;
+  if (off < 0 || len <= 0 || len > (*env)->GetArrayLength(env, data) - off) return;
   jbyte* bytes = (*env)->GetPrimitiveArrayCritical(env, data, NULL);
+  if (!bytes) return;
   ghostty_terminal_vt_write(h->term, (const uint8_t*)bytes + off, (size_t)len);
   (*env)->ReleasePrimitiveArrayCritical(env, data, bytes, JNI_ABORT);
 }
@@ -119,7 +143,7 @@ JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSetColors(
   ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, fg == 0 ? NULL : &f);
   ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, bg == 0 ? NULL : &b);
   ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, cursor == 0 ? NULL : &c);
-  if (palette == NULL) {
+  if (palette == NULL || (*env)->GetArrayLength(env, palette) < 256) {
     ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, NULL);
   } else {
     jint values[256];
@@ -191,7 +215,14 @@ JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeRender(
   jint extrasLen = 0;
   if (needed <= cap) {
     jint* out = (*env)->GetPrimitiveArrayCritical(env, cellsArr, NULL);
+    if (!out) return JNI_FALSE;
     jint* extras = (*env)->GetPrimitiveArrayCritical(env, extrasArr, NULL);
+    if (!extras) {
+      (*env)->ReleasePrimitiveArrayCritical(env, cellsArr, out, JNI_ABORT);
+      return JNI_FALSE;
+    }
+    /* Cells the iterators don't reach would otherwise keep what the last frame drew there. */
+    memset(out, 0, (size_t)needed * sizeof(jint));
     ghostty_render_state_get(h->rs, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &h->rows);
     int y = 0;
     while (y < rows && ghostty_render_state_row_iterator_next(h->rows)) {
@@ -301,7 +332,8 @@ JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeClearSelection(
   ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_SELECTION, NULL);
 }
 
-JNIEXPORT jstring JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSelectionText(
+// The selected text as UTF-8, or null when nothing is selected.
+JNIEXPORT jbyteArray JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSelectionText(
     JNIEnv* env, jclass cls, jlong handle) {
   Term* h = (Term*)(intptr_t)handle;
   GhosttySelection sel;
@@ -315,43 +347,21 @@ JNIEXPORT jstring JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSelectionTex
   uint8_t* out = NULL;
   size_t len = 0;
   if (ghostty_terminal_selection_format_alloc(h->term, NULL, &o, &out, &len) != GHOSTTY_SUCCESS || !out) return NULL;
-  char* z = malloc(len + 1);
-  memcpy(z, out, len);
-  z[len] = 0;
+  jbyteArray bytes = to_bytes(env, out, len);
   ghostty_free(NULL, out, len);
-  jbyteArray bytes = (*env)->NewByteArray(env, (jsize)len);
-  (*env)->SetByteArrayRegion(env, bytes, 0, (jsize)len, (const jbyte*)z);
-  free(z);
-  jclass strCls = (*env)->FindClass(env, "java/lang/String");
-  jmethodID ctor = (*env)->GetMethodID(env, strCls, "<init>", "([BLjava/lang/String;)V");
-  jstring utf8 = (*env)->NewStringUTF(env, "UTF-8");
-  return (jstring)(*env)->NewObject(env, strCls, ctor, bytes, utf8);
+  return bytes;
 }
 
-JNIEXPORT jstring JNICALL Java_dev_compy_term_GhosttyTerminal_nativeTitle(
-    JNIEnv* env, jclass cls, jlong handle) {
-  Term* h = (Term*)(intptr_t)handle;
-  GhosttyString s = {0};
-  if (ghostty_terminal_get(h->term, GHOSTTY_TERMINAL_DATA_TITLE, &s) != GHOSTTY_SUCCESS || s.len == 0) return NULL;
-  char* z = malloc(s.len + 1);
-  memcpy(z, s.ptr, s.len);
-  z[s.len] = 0;
-  jstring out = (*env)->NewStringUTF(env, z);
-  free(z);
-  return out;
-}
-
-// Returns a cell's OSC 8 hyperlink target, or null when it has none.
-JNIEXPORT jstring JNICALL Java_dev_compy_term_GhosttyTerminal_nativeHyperlinkAt(
+// Returns a cell's OSC 8 hyperlink target as UTF-8, or null when it has none.
+JNIEXPORT jbyteArray JNICALL Java_dev_compy_term_GhosttyTerminal_nativeHyperlinkAt(
     JNIEnv* env, jclass cls, jlong handle, jint x, jint y) {
   Term* h = (Term*)(intptr_t)handle;
   GhosttyGridRef ref;
   if (!viewport_ref(h, x, y, &ref)) return NULL;
   uint8_t buf[2048];
   size_t len = 0;
-  if (ghostty_grid_ref_hyperlink_uri(&ref, buf, sizeof(buf) - 1, &len) != GHOSTTY_SUCCESS || len == 0) return NULL;
-  buf[len] = 0;
-  return (*env)->NewStringUTF(env, (const char*)buf);
+  if (ghostty_grid_ref_hyperlink_uri(&ref, buf, sizeof(buf), &len) != GHOSTTY_SUCCESS || len == 0) return NULL;
+  return to_bytes(env, buf, len);
 }
 
 JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeScrollPrompt(
@@ -382,6 +392,7 @@ JNIEXPORT jint JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSearch(
   if (!h->search && ghostty_search_new(NULL, &h->search, h->term) != GHOSTTY_SUCCESS) return 0;
   jsize len = (*env)->GetArrayLength(env, needle);
   jbyte* bytes = (*env)->GetByteArrayElements(env, needle, NULL);
+  if (!bytes) return 0;
   GhosttyString text = { (const uint8_t*)bytes, (size_t)len };
   GhosttyResult r = ghostty_search_set(h->search, GHOSTTY_SEARCH_OPT_NEEDLE, &text);
   if (r == GHOSTTY_SUCCESS) r = ghostty_search_run(h->search);
@@ -407,7 +418,7 @@ JNIEXPORT jint JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSearchStep(
 JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSearchClear(
     JNIEnv* env, jclass cls, jlong handle) {
   Term* h = (Term*)(intptr_t)handle;
-  if (h->search) ghostty_search_free(h->search);
+  ghostty_search_free(h->search);
   h->search = NULL;
 }
 
@@ -437,6 +448,7 @@ JNIEXPORT jint JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSearchHighlight
   ghostty_terminal_get(h->term, GHOSTTY_TERMINAL_DATA_ROWS, &rows);
   jsize cap = (*env)->GetArrayLength(env, out) / 5;
   jint* values = (*env)->GetIntArrayElements(env, out, NULL);
+  if (!values) return 0;
   jint count = 0;
   for (size_t i = 0; i < found && count < cap; i++) {
     GhosttyPointCoordinate a, b;

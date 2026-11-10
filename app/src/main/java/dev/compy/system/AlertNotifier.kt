@@ -20,6 +20,7 @@ import dev.compy.rex.ProgramStatus
 import dev.compy.rex.ServerConnection
 import kotlinx.coroutines.launch
 import java.time.Instant
+import kotlinx.coroutines.withTimeoutOrNull
 
 object AlertChannels {
     const val WATCHING = "watching"
@@ -81,7 +82,11 @@ class AlertNotifier(private val context: Context, private val app: AppState) {
                 handle(connection, block, before, status)
             }
             // Status that's gone means the program moved on.
-            (previous.keys - now.keys).forEach(::cancel)
+            (previous.keys - now.keys).forEach { block ->
+                cancel(block)
+                // Otherwise the record of what was last alerted grows by one for every pane ever seen.
+                seen.edit().remove(block).apply()
+            }
             previous = now
         }
     }
@@ -115,17 +120,12 @@ class AlertNotifier(private val context: Context, private val app: AppState) {
         val who = status.app?.replaceFirstChar { it.uppercase() } ?: "A program"
         val kind = alertKind(status) ?: return
         val (channel, title) = when (kind) {
-            AlertKind.NeedsYou -> AlertChannels.NEEDS_YOU to when (status.kind) {
-                "permission" -> "$who needs your permission"
-                "question" -> "$who has a question"
-                "auth" -> "$who needs a password"
-                else -> "$who needs you"
-            }
+            AlertKind.NeedsYou -> AlertChannels.NEEDS_YOU to "$who ${status.blockedReason}"
             AlertKind.Finished -> AlertChannels.FINISHED to "$who finished"
             AlertKind.Failed -> AlertChannels.ERRORS to "$who hit an error"
         }
         val body = status.message ?: window?.displayTitle(connection.titles.value) ?: connection.titles.value[block] ?: "Detached pane"
-        val where = "${view.label} · ${connection.config.label}"
+        val where = "${view.label} · ${connection.label.value}"
         postNotification(block, channel, title, body, where, connection.config.id, view.sessionId, kind == AlertKind.NeedsYou)
     }
 
@@ -199,12 +199,12 @@ class AlertNotifier(private val context: Context, private val app: AppState) {
      * until the app posts it again, so cancelling alone leaves it stuck. This replaces it quietly
      * and lets it time out by itself.
      */
-    fun replySent(block: String, text: String) {
+    fun replySent(block: String) {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
         val notification = NotificationCompat.Builder(context, AlertChannels.FINISHED)
             .setSmallIcon(R.drawable.ic_tile)
+            // Without the text: it may be a password, and this sits in the shade for a few seconds.
             .setContentTitle("Reply sent")
-            .setContentText(text)
             .setSilent(true)
             .setAutoCancel(true)
             .setTimeoutAfter(REPLY_CONFIRM_MS)
@@ -237,8 +237,10 @@ class AlertReplyReceiver : BroadcastReceiver() {
         app.scope.launch {
             try {
                 val connection = app.connections.value[server] ?: error("This server is no longer in Compy")
-                connection.sendReply(session, block, text)
-                app.notifier.replySent(block, text)
+                // Android gives a broadcast about ten seconds, and a reply is three calls to the server.
+                withTimeoutOrNull(REPLY_DEADLINE_MS) { connection.sendReply(session, block, text) }
+                    ?: error("The server took too long to answer")
+                app.notifier.replySent(block)
             } catch (e: Exception) {
                 app.notifier.replyFailed(block, server, session, e.message ?: "Compy isn't connected")
             } finally {
@@ -249,5 +251,6 @@ class AlertReplyReceiver : BroadcastReceiver() {
 
     companion object {
         const val KEY_TEXT = "reply"
+        private const val REPLY_DEADLINE_MS = 8_000L
     }
 }

@@ -114,6 +114,7 @@ private fun lerpScheme(a: ColorScheme, b: ColorScheme, t: Float): ColorScheme = 
     secondaryContainer = lerp(a.secondaryContainer, b.secondaryContainer, t),
     onSecondaryContainer = lerp(a.onSecondaryContainer, b.onSecondaryContainer, t),
     tertiary = lerp(a.tertiary, b.tertiary, t),
+    onTertiary = lerp(a.onTertiary, b.onTertiary, t),
     tertiaryContainer = lerp(a.tertiaryContainer, b.tertiaryContainer, t),
     onTertiaryContainer = lerp(a.onTertiaryContainer, b.onTertiaryContainer, t),
     background = lerp(a.background, b.background, t),
@@ -123,6 +124,7 @@ private fun lerpScheme(a: ColorScheme, b: ColorScheme, t: Float): ColorScheme = 
     surfaceVariant = lerp(a.surfaceVariant, b.surfaceVariant, t),
     onSurfaceVariant = lerp(a.onSurfaceVariant, b.onSurfaceVariant, t),
     error = lerp(a.error, b.error, t),
+    onError = lerp(a.onError, b.onError, t),
     errorContainer = lerp(a.errorContainer, b.errorContainer, t),
     onErrorContainer = lerp(a.onErrorContainer, b.onErrorContainer, t),
     outline = lerp(a.outline, b.outline, t),
@@ -132,6 +134,13 @@ private fun lerpScheme(a: ColorScheme, b: ColorScheme, t: Float): ColorScheme = 
     surfaceContainer = lerp(a.surfaceContainer, b.surfaceContainer, t),
     surfaceContainerHigh = lerp(a.surfaceContainerHigh, b.surfaceContainerHigh, t),
     surfaceContainerHighest = lerp(a.surfaceContainerHighest, b.surfaceContainerHighest, t),
+    surfaceBright = lerp(a.surfaceBright, b.surfaceBright, t),
+    surfaceDim = lerp(a.surfaceDim, b.surfaceDim, t),
+    surfaceTint = lerp(a.surfaceTint, b.surfaceTint, t),
+    inverseSurface = lerp(a.inverseSurface, b.inverseSurface, t),
+    inverseOnSurface = lerp(a.inverseOnSurface, b.inverseOnSurface, t),
+    inversePrimary = lerp(a.inversePrimary, b.inversePrimary, t),
+    scrim = lerp(a.scrim, b.scrim, t),
 )
 
 private fun wallpaperScheme(context: Context, dark: Boolean, dynamic: Boolean, amoled: Boolean): ColorScheme {

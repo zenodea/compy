@@ -78,9 +78,11 @@ internal fun describeArgs(args: JsonElement?): String? {
     return args?.let(::flat)?.takeIf { it.isNotBlank() }?.take(60)
 }
 
+private val KEY_POSITION = Regex("""\[(?:Key|Digit)?(\w+)]""")
+
 /** How a binding's keys read, with Rex's position markers removed: cmd+[KeyK] becomes cmd+k. */
 internal fun describeKeys(keys: List<String>): String? = keys.takeIf { it.isNotEmpty() }?.joinToString(" ") { key ->
-    key.replace(Regex("""\[(?:Key|Digit)?(\w+)]""")) { it.groupValues[1].lowercase() }
+    key.replace(KEY_POSITION) { it.groupValues[1].lowercase() }
 }
 
 private fun rexCommands(keymap: RexKeymap, controller: WorkspaceController, onMessage: (String) -> Unit, close: () -> Unit): List<Command> {

@@ -2,8 +2,10 @@ package dev.compy.rex
 
 import android.util.Base64
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -13,8 +15,11 @@ import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import java.io.InputStream
 
-/** A file to send to a terminal's machine: its name, exact size in bytes, and a way to read it. */
-class UploadFile(val name: String, val size: Long, val open: () -> InputStream)
+/**
+ * A file to send to a terminal's machine: its name, exact size in bytes, and a way to read it.
+ * [discard] runs once the upload is over, to delete a temporary copy.
+ */
+class UploadFile(val name: String, val size: Long, val discard: () -> Unit = {}, val open: () -> InputStream)
 
 /**
  * One file's `rex.data.bytes.v1` stream. Rex types a batch's paths once every file has arrived, and
@@ -47,7 +52,8 @@ internal class UploadStream(http: OkHttpClient, baseUrl: String, ticket: String)
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                webSocket.close(code, null)
+                // Not the peer's code: one sent without a status arrives as 1005, which can't be sent back.
+                webSocket.close(1000, null)
                 end(code, reason)
             }
 
@@ -68,7 +74,14 @@ internal class UploadStream(http: OkHttpClient, baseUrl: String, ticket: String)
 
     /** Sends the file's bytes, then an empty message, which tells the server the file is complete. */
     suspend fun send(file: UploadFile, onSent: (Long) -> Unit) {
-        withTimeout(HANDSHAKE_TIMEOUT_MS) { welcome.await() }
+        withTimeoutOrNull(HANDSHAKE_TIMEOUT_MS) { welcome.await() }
+            ?: throw RexError("timeout", "The server didn't accept the upload in time", 0)
+        // Opening and reading can block for as long as the file's app takes to fetch it.
+        withContext(Dispatchers.IO) { sendBytes(file, onSent) }
+        socket.send(ByteString.EMPTY)
+    }
+
+    private suspend fun sendBytes(file: UploadFile, onSent: (Long) -> Unit) {
         file.open().use { input ->
             val buffer = ByteArray(CHUNK_BYTES)
             while (true) {
@@ -86,7 +99,6 @@ internal class UploadStream(http: OkHttpClient, baseUrl: String, ticket: String)
                 onSent(n.toLong())
             }
         }
-        socket.send(ByteString.EMPTY)
     }
 
     /** Waits for the server to end the stream. Code 1000 means the file arrived and its path was typed. */

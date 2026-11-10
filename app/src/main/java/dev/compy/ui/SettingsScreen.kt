@@ -3,6 +3,7 @@ package dev.compy.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -25,6 +26,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material3.ListItemDefaults
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -66,6 +69,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.app.NotificationManagerCompat
 import dev.compy.AppState
@@ -77,8 +81,12 @@ import dev.compy.system.notificationSettingsIntent
 import dev.compy.data.DefaultKeyBar
 import dev.compy.data.KeyDef
 import dev.compy.data.Settings
+import dev.compy.term.TerminalFonts
 import dev.compy.term.TerminalView
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun SettingsScreen(app: AppState, onBack: () -> Unit) {
@@ -226,19 +234,34 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
     var themeMenu by remember { mutableStateOf(false) }
     var showLicenses by remember { mutableStateOf(false) }
     val update: ((Settings) -> Settings) -> Unit = { app.updateSettings(it) }
+    // Counts returns to this screen, so what Android allows is read again after a trip to its settings.
+    var resumes by remember { mutableIntStateOf(0) }
+    LifecycleResumeEffect(Unit) {
+        resumes++
+        onPauseOrDispose { }
+    }
 
     val fontPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
-            val file = File(context.filesDir, "terminal-font")
-            runCatching {
-                context.contentResolver.openInputStream(uri)!!.use { input -> file.outputStream().use { input.copyTo(it) } }
-            }.onSuccess {
+            val old = settings.customFontPath
+            // Off the main thread: a file kept in the cloud is downloaded as it's read.
+            app.scope.launch(Dispatchers.IO) {
                 // Each import needs a fresh path so the change is seen even with the same name.
                 val stamped = File(context.filesDir, "terminal-font-${System.currentTimeMillis()}.ttf")
-                file.renameTo(stamped)
-                val old = settings.customFontPath
-                update { it.copy(customFontPath = stamped.path) }
-                old?.let { path -> File(path).delete() }
+                val usable = runCatching {
+                    context.contentResolver.openInputStream(uri)!!.use { input -> stamped.outputStream().use { input.copyTo(it) } }
+                    TerminalFonts.fromFile(context, stamped) != null
+                }.getOrDefault(false)
+                if (usable) {
+                    update { it.copy(customFontPath = stamped.path) }
+                    old?.let { path -> File(path).delete() }
+                } else {
+                    // Kept, it would show as the imported font while the built-in one was drawn.
+                    stamped.delete()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "That file isn't a font Compy can use", Toast.LENGTH_LONG).show()
+                    }
+                }
             }
         }
     }
@@ -264,7 +287,8 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
             item {
                 Group("App icon") { AppIconPicker() }
                 Group("Notifications") {
-                    val notificationsAllowed = NotificationManagerCompat.from(context).areNotificationsEnabled()
+                    val notificationsAllowed = remember(resumes) { NotificationManagerCompat.from(context).areNotificationsEnabled() }
+                    val batteryExempt = remember(resumes) { isIgnoringBatteryOptimizations(context) }
                     SwitchRow(
                         "Alert me when Compy is closed",
                         "Stays connected in the background and shows a silent ongoing notification. Uses some battery.",
@@ -279,7 +303,7 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
                             context.startActivity(notificationSettingsIntent(context))
                         })
                     }
-                    if (settings.backgroundAlerts && !isIgnoringBatteryOptimizations(context)) {
+                    if (settings.backgroundAlerts && !batteryExempt) {
                         Row2("Allow background use", "Without this, your phone may stop the connection alerts depend on", onClick = {
                             context.startActivity(batteryExemptionIntent(context))
                         })
@@ -308,10 +332,14 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
                         }
                     }
                     Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
-                        Text("Font size: ${"%.1f".format(settings.fontSizeSp)}", style = MaterialTheme.typography.bodyLarge)
+                        // Saved on release. Saving every step rewrote the settings file dozens of
+                        // times a second, and the thumb trailed the finger while it waited.
+                        var size by remember(settings.fontSizeSp) { mutableFloatStateOf(settings.fontSizeSp) }
+                        Text("Font size: ${"%.1f".format(size)}", style = MaterialTheme.typography.bodyLarge)
                         Slider(
-                            settings.fontSizeSp,
-                            onValueChange = { v -> update { it.copy(fontSizeSp = v) } },
+                            size,
+                            onValueChange = { size = it },
+                            onValueChangeFinished = { update { it.copy(fontSizeSp = size) } },
                             valueRange = TerminalView.MIN_FONT..TerminalView.MAX_FONT,
                         )
                         Text("You can also pinch a terminal.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

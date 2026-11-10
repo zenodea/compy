@@ -2,7 +2,6 @@ package dev.compy.rex
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
-import java.io.ByteArrayOutputStream
 
 /**
  * Splits a terminal stream into its three parts: the leading Ghostty snapshot, program output, and
@@ -17,32 +16,37 @@ class TerminalStreamParser(
     private val onMessage: (JsonObject) -> Unit,
 ) {
     private val marker = "\u001b_rex1;$nonce;".toByteArray(Charsets.US_ASCII)
-    private val snapshot = ByteArrayOutputStream(64 * 1024)
+    /** The snapshot as it arrives. Dropped once decoded, since it can be several megabytes. */
+    private var snapshot: ByteArray? = ByteArray(64 * 1024)
+    private var snapshotLen = 0
     private var inSnapshot = true
     private var pending = ByteArray(0)
     private var searchedTo = 0
 
     fun feed(data: ByteArray, len: Int = data.size) {
-        if (inSnapshot) {
-            snapshot.write(data, 0, len)
-            feedSnapshot()
-            return
-        }
-        scan(data, len)
+        if (inSnapshot) feedSnapshot(data, len) else scan(data, len)
     }
 
-    private fun feedSnapshot() {
-        val bytes = snapshot.toByteArray()
-        val start = maxOf(0, searchedTo - marker.size)
-        val at = indexOf(bytes, marker, start, bytes.size)
+    private fun feedSnapshot(data: ByteArray, len: Int) {
+        var bytes = snapshot ?: return
+        if (snapshotLen + len > bytes.size) {
+            bytes = bytes.copyOf(maxOf(bytes.size * 2, snapshotLen + len))
+            snapshot = bytes
+        }
+        System.arraycopy(data, 0, bytes, snapshotLen, len)
+        snapshotLen += len
+        // The marker may straddle two chunks, so look again from just before the new bytes.
+        val at = indexOf(bytes, marker, maxOf(0, searchedTo - marker.size), snapshotLen)
         if (at < 0) {
-            searchedTo = bytes.size
+            searchedTo = snapshotLen
             return
         }
+        val total = snapshotLen
         inSnapshot = false
+        snapshot = null
+        snapshotLen = 0
         onSnapshot(bytes, at)
-        snapshot.reset()
-        scan(bytes.copyOfRange(at, bytes.size), bytes.size - at)
+        scan(bytes.copyOfRange(at, total), total - at)
     }
 
     private fun scan(chunk: ByteArray, chunkLen: Int) {

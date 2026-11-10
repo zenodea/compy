@@ -23,6 +23,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Build
@@ -45,6 +46,7 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -63,11 +65,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import dev.compy.rex.ChatEntry
 import dev.compy.rex.ChatImage
 import dev.compy.rex.ResultEntry
 import dev.compy.rex.TranscriptFeed
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
@@ -89,7 +96,10 @@ fun AgentChat(
     modifier: Modifier = Modifier,
 ) {
     val feed = remember(blockId) { controller.feed(blockId) }
-    LaunchedEffect(feed) { feed.run() }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    // Only while the app is visible: alerts keep the connection open in the background, and the
+    // feed would go on asking the host for new lines every second and a half.
+    LaunchedEffect(feed, lifecycle) { lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { feed.run() } }
     val state by feed.state.collectAsState()
     val statuses by controller.connection.statuses.collectAsStateWithLifecycle()
     val status = statuses[blockId]
@@ -116,7 +126,7 @@ fun AgentChat(
             }
             TranscriptFeed.Status.Live, is TranscriptFeed.Status.Failed -> {
                 if (s is TranscriptFeed.Status.Failed) Banner(s.message)
-                Conversation(controller, feed, state, { viewing = it }, Modifier.weight(1f))
+                Conversation(feed, state, { viewing = it }, Modifier.weight(1f))
                 when {
                     status?.isBlocked == true -> AskingBar(status.message, onShowTerminal)
                     status?.isWorking == true -> WorkingLine(status.message)
@@ -134,7 +144,6 @@ fun AgentChat(
 
 @Composable
 private fun Conversation(
-    controller: WorkspaceController,
     feed: TranscriptFeed,
     state: TranscriptFeed.State,
     onOpenImage: (ChatImage) -> Unit,
@@ -147,12 +156,27 @@ private fun Conversation(
         if (!state.hasOlder) return@LaunchedEffect
         snapshotFlow { list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
             .distinctUntilChanged()
-            .collect { last -> if (last >= list.layoutInfo.totalItemsCount - 4) feed.loadOlder() }
+            .collect { last ->
+                if (last < list.layoutInfo.totalItemsCount - 4) return@collect
+                // A read can add nothing to show, such as a chunk holding only tool results, and
+                // the list then never moves to ask again. So keep reading, a few times at most.
+                repeat(OLDER_READS) {
+                    val before = feed.state.value.entries.size
+                    feed.loadOlder()
+                    val now = feed.state.value
+                    if (now.entries.size != before || !now.hasOlder || now.status != TranscriptFeed.Status.Live) return@collect
+                }
+            }
     }
     // Follow new messages while reading the newest ones, but not while reading back.
     val newest = entries.firstOrNull()?.key
+    // Decided here, before the new rows are laid out. The list keeps its place by key when rows
+    // arrive, so afterwards its first visible index has moved past them, and three rows arriving
+    // at once used to stop the chat following for good.
+    val nearNewest by remember(list) { derivedStateOf { list.firstVisibleItemIndex <= 2 } }
+    val follow = nearNewest
     LaunchedEffect(newest) {
-        if (newest != null && list.firstVisibleItemIndex <= 2) list.animateScrollToItem(0)
+        if (newest != null && follow) list.animateScrollToItem(0)
     }
     if (entries.isEmpty()) {
         Centered(modifier) {
@@ -169,7 +193,7 @@ private fun Conversation(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
-            items(entries, key = { it.key }) { entry -> Entry(controller, feed, entry, onOpenImage) }
+            items(entries, key = { it.key }) { entry -> Entry(feed, entry, onOpenImage) }
             if (state.loadingOlder) {
                 item(key = "older") { Centered { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) } }
             }
@@ -178,7 +202,7 @@ private fun Conversation(
 }
 
 @Composable
-private fun Entry(controller: WorkspaceController, feed: TranscriptFeed, entry: ChatEntry, onOpenImage: (ChatImage) -> Unit) {
+private fun Entry(feed: TranscriptFeed, entry: ChatEntry, onOpenImage: (ChatImage) -> Unit) {
     val scheme = MaterialTheme.colorScheme
     when (entry) {
         is ChatEntry.User -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
@@ -198,7 +222,7 @@ private fun Entry(controller: WorkspaceController, feed: TranscriptFeed, entry: 
         is ChatEntry.Assistant -> MarkdownText(entry.text, scheme.onSurface, Modifier.fillMaxWidth().padding(end = 8.dp))
         is ChatEntry.Thinking -> Expandable(Icons.Rounded.Psychology, "Thinking", null, entry.text, mono = false)
         is ChatEntry.Tool -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            ToolRow(controller, entry)
+            ToolRow(entry)
             // What the agent looked at, shown without opening the row.
             entry.result?.images?.takeIf { it.isNotEmpty() }?.let { ChatImageRow(feed, it, onOpenImage, Modifier.padding(start = 28.dp)) }
         }
@@ -214,7 +238,7 @@ private fun Entry(controller: WorkspaceController, feed: TranscriptFeed, entry: 
 }
 
 @Composable
-private fun ToolRow(controller: WorkspaceController, tool: ChatEntry.Tool) {
+private fun ToolRow(tool: ChatEntry.Tool) {
     val detail = buildString {
         tool.input?.let { append(it) }
         tool.result?.output?.takeIf { it.isNotBlank() }?.let {
@@ -273,6 +297,8 @@ private fun Expandable(
                 Modifier
                     .padding(top = 6.dp)
                     .heightIn(max = 420.dp)
+                    // Without this the rest of a long result is cut off with no way to reach it.
+                    .verticalScroll(rememberScrollState())
                     .then(if (mono) Modifier.horizontalScroll(rememberScrollState()) else Modifier),
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = if (mono) FontFamily.Monospace else null,
@@ -314,10 +340,20 @@ private fun Composer(controller: WorkspaceController, blockId: String, feed: Tra
                 if (message.isEmpty() || sending) return@FilledIconButton
                 sending = true
                 scope.launch {
-                    runCatching { controller.connection.sendReply(controller.sessionId, blockId, message) }
-                        .onSuccess { text = ""; feed.nudge() }
-                        .onFailure { controller.showMessage(it.message ?: "Couldn't send that") }
-                    sending = false
+                    try {
+                        controller.connection.sendReply(controller.sessionId, blockId, message)
+                        // Leave anything typed while this was on its way.
+                        if (text.trim() == message) text = ""
+                        feed.nudge()
+                    } catch (e: TimeoutCancellationException) {
+                        controller.showMessage("The server took too long to answer")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        controller.showMessage(e.message ?: "Couldn't send that")
+                    } finally {
+                        sending = false
+                    }
                 }
             },
             enabled = text.isNotBlank() && !sending,
@@ -446,3 +482,6 @@ fun ChatToggle(chat: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier
         }
     }
 }
+
+/** How many reads back in a row may add nothing to show before the chat stops asking. */
+private const val OLDER_READS = 8

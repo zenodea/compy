@@ -71,6 +71,23 @@ class TerminalStreamParserTest {
         verify(s)
     }
 
+    @Test fun keepsALargeSnapshotWholeAcrossManyChunks() {
+        // Larger than the buffer starts out, and no byte pair in it can begin a Rex message.
+        val big = ByteArray(300_000) { (it % 251).toByte() }
+        val all = big + rex("""{"type":"resize","cols":80,"rows":24}""") + "tail".toByteArray()
+        val s = Sink()
+        val p = parser(s)
+        var at = 0
+        while (at < all.size) {
+            val n = minOf(7001, all.size - at)
+            p.feed(all.copyOfRange(at, at + n))
+            at += n
+        }
+        assertArrayEquals(big, s.snapshot)
+        assertArrayEquals("tail".toByteArray(), s.output.toByteArray())
+        assertEquals(1, s.messages.size)
+    }
+
     @Test fun plainEscapeIsNotHeldBack() {
         val s = Sink()
         val p = parser(s)

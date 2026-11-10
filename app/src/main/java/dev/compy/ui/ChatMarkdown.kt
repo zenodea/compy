@@ -18,12 +18,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 
@@ -103,6 +106,9 @@ private fun alignTable(rows: List<String>): String {
     }
 }
 
+/** True when the character at [at] is part of a name, where an underscore is only an underscore. */
+private fun insideWord(text: String, at: Int) = at in text.indices && (text[at].isLetterOrDigit() || text[at] == '_')
+
 /** Inline Markdown: `code`, **bold**, *italic* and [links](url). */
 internal fun inlineMarkdown(text: String, codeBackground: Color, linkColor: Color): AnnotatedString = buildAnnotatedString {
     var i = 0
@@ -117,29 +123,42 @@ internal fun inlineMarkdown(text: String, codeBackground: Color, linkColor: Colo
                     continue
                 }
             }
-            text.startsWith("**", i) || text.startsWith("__", i) -> {
+            text.startsWith("**", i) || (text.startsWith("__", i) && !insideWord(text, i - 1)) -> {
                 val mark = text.substring(i, i + 2)
                 val end = text.indexOf(mark, i + 2)
-                if (end > i + 2) {
+                // Underscores inside a name, such as foo__bar__baz, aren't emphasis.
+                if (end > i + 2 && (c == '*' || !insideWord(text, end + 2))) {
                     withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append(inlineMarkdown(text.substring(i + 2, end), codeBackground, linkColor)) }
                     i = end + 2
                     continue
                 }
             }
             (c == '*' || c == '_') && i + 1 < text.length && !text[i + 1].isWhitespace() &&
-                (i == 0 || !text[i - 1].isLetterOrDigit()) -> {
+                !insideWord(text, i - 1) -> {
                 val end = text.indexOf(c, i + 1)
-                if (end > i + 1 && !text[end - 1].isWhitespace()) {
+                // An underscore with more of the name after it, as in _private_var, isn't a closer.
+                if (end > i + 1 && !text[end - 1].isWhitespace() && (c == '*' || !insideWord(text, end + 1))) {
                     withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(text.substring(i + 1, end)) }
                     i = end + 1
                     continue
                 }
             }
             c == '[' -> {
-                val close = text.indexOf("](", i)
-                val end = if (close > i) text.indexOf(')', close) else -1
+                // The first closing bracket must be the one before the address. Looking for any
+                // later "](" made "[x] see [docs](url)" one link from the first bracket on.
+                val close = text.indexOf(']', i + 1)
+                val end = if (close > i && text.startsWith("](", close)) text.indexOf(')', close) else -1
                 if (end > close) {
-                    withStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)) { append(text.substring(i + 1, close)) }
+                    val label = text.substring(i + 1, close)
+                    // An address may be followed by a title in quotes.
+                    val url = text.substring(close + 2, end).trim().substringBefore(' ')
+                    val style = SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)
+                    // An agent wrote this, so only ever hand web links to other apps.
+                    if (url.startsWith("http://") || url.startsWith("https://")) {
+                        withLink(LinkAnnotation.Url(url, TextLinkStyles(style))) { append(label) }
+                    } else {
+                        withStyle(style) { append(label) }
+                    }
                     i = end + 1
                     continue
                 }

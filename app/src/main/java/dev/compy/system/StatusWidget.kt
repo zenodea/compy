@@ -17,14 +17,8 @@ class StatusWidget : AppWidgetProvider() {
         fun update(context: Context, manager: AppWidgetManager, ids: IntArray) {
             val snapshot = StatusSnapshot.read(context)
             val views = RemoteViews(context.packageName, R.layout.widget_status)
-            val summary = when {
-                snapshot.savedAt == 0L -> "No data yet"
-                snapshot.blocked > 0 -> "${snapshot.blocked} need you"
-                snapshot.working > 0 -> "${snapshot.working} working"
-                else -> "${snapshot.sessions} sessions"
-            }
-            views.setTextViewText(R.id.widget_summary, summary)
-            views.setTextViewText(R.id.widget_age, StatusSnapshot.age(snapshot))
+            views.setTextViewText(R.id.widget_summary, snapshot.summary ?: "No data yet")
+            views.setTextViewText(R.id.widget_age, StatusSnapshot.updated(context, snapshot))
             views.setTextViewText(R.id.widget_lines, snapshot.lines.joinToString("\n"))
             val intent = PendingIntent.getActivity(
                 context, 0, Intent(context, MainActivity::class.java),

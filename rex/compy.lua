@@ -38,8 +38,10 @@ end
 
 -- Which agent a pane's foreground process is, from its name, argv[0] or script.
 local function agent_of(fg)
-  for _, name in ipairs{ fg.argv0, base(fg.invoked_path), fg.name, base(fg.script) } do
-    if name == "claude" then return "claude" end
+  -- Counted rather than ipairs, which stops at the first name that's missing.
+  local names = { base(fg.argv0), base(fg.invoked_path), fg.name, base(fg.script) }
+  for i = 1, 4 do
+    if names[i] == "claude" then return "claude" end
   end
   return nil
 end
@@ -168,15 +170,16 @@ local function transcript(ctx, args)
     return info
   end
   local size = f:seek("end")
-  local budget = math.min(MAX_BYTES, tonumber(args.max_bytes) or DEFAULT_BYTES)
+  -- At least a little: with no budget the search for a whole line would never widen.
+  local budget = math.max(4096, math.min(MAX_BYTES, tonumber(args.max_bytes) or DEFAULT_BYTES))
   local lines, start, stop
   local after = tonumber(args.after)
-  if after and after <= size then
+  if after and after >= 0 and after <= size then
     start = after
     lines, stop = forward(f, after, size, budget)
   else
     -- No offset (or the file shrank): the newest lines, or those before `before`.
-    lines, start, stop = backward(f, math.min(size, tonumber(args.before) or size), budget)
+    lines, start, stop = backward(f, math.max(0, math.min(size, tonumber(args.before) or size)), budget)
   end
   f:close()
   info.size, info.start, info.stop, info.lines = size, start, stop, lines

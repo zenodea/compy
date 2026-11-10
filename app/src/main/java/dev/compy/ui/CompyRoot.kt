@@ -1,9 +1,13 @@
 package dev.compy.ui
 
 import android.Manifest
+import android.view.Window
+import android.view.WindowManager
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.key
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import dev.compy.system.batteryExemptionIntent
 import dev.compy.system.isIgnoringBatteryOptimizations
@@ -73,9 +77,7 @@ fun CompyRoot(app: AppState, activity: FragmentActivity) {
     val settings by app.settings.collectAsStateWithLifecycle()
     val locked by app.locked.collectAsStateWithLifecycle()
     val servers by app.servers.collectAsStateWithLifecycle()
-    val canLock = remember(activity) {
-        BiometricManager.from(activity).canAuthenticate(LOCK_AUTHENTICATORS) == BiometricManager.BIOMETRIC_SUCCESS
-    }
+    val canLock = rememberCanLock(activity)
     if (settings.biometricLock && canLock && locked) {
         LockScreen(app, activity)
         return
@@ -108,6 +110,37 @@ fun CompyRoot(app: AppState, activity: FragmentActivity) {
         }
     }
     val current = if (servers.isEmpty()) Screen.AddServer else screen
+
+    val connections by app.connections.collectAsStateWithLifecycle()
+    val alertHost = remember { SnackbarHostState() }
+    val compact = LocalConfiguration.current.screenWidthDp < COMPACT_BELOW_DP
+    // Whether the selected session's panes are what's on screen: not Settings, nor the list on a phone.
+    val workspaceShown = rememberUpdated(current == Screen.Main && !(compact && showList))
+    // Tell people when something elsewhere needs them, unless they're already looking at it.
+    // Watched here, above every screen, so an alert raised while Settings is open isn't lost.
+    connections.values.forEach { c ->
+        key(c.config.id) {
+            LaunchedEffect(c) {
+                c.alerts.collect { alert ->
+                    val selected = app.selection.value
+                    val window = c.views.value[alert.sessionId]?.activeWindow
+                    val focused = workspaceShown.value && app.foreground.value &&
+                        selected?.serverId == alert.serverId && selected.sessionId == alert.sessionId &&
+                        window?.focusedBlockId == alert.blockId && window.layerOf(alert.blockId)?.minimized != true
+                    if (alert.always || !focused) {
+                        scope.launch {
+                            val result = alertHost.showSnackbar(alert.text, actionLabel = if (focused) null else "Open", duration = SnackbarDuration.Short)
+                            if (result == SnackbarResult.ActionPerformed) {
+                                screen = Screen.Main
+                                app.requestOpen(dev.compy.Selection(alert.serverId, alert.sessionId))
+                                app.revealPane(c, alert.sessionId, alert.blockId)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         AnimatedContent(
             current,
@@ -140,6 +173,7 @@ fun CompyRoot(app: AppState, activity: FragmentActivity) {
             }
         }
         SnackbarHost(snackbars, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()) { Snackbar(it) }
+        SnackbarHost(alertHost, Modifier.align(Alignment.TopCenter).statusBarsPadding()) { Snackbar(it) }
     }
 }
 
@@ -159,40 +193,26 @@ private fun MainLayout(
     val connection = selection?.let { connections[it.serverId] }
     val sessionId = selection?.sessionId
     val alertScope = rememberCoroutineScope()
-    val alertHost = remember { SnackbarHostState() }
-    // Tell people when something elsewhere needs them, unless they're already looking at it.
-    connections.values.forEach { c ->
-        LaunchedEffect(c) {
-            c.alerts.collect { alert ->
-                val focused = alert.sessionId == app.selection.value?.sessionId && app.foreground.value &&
-                    c.views.value[alert.sessionId]?.activeWindow?.focusedBlockId == alert.blockId &&
-                    c.views.value[alert.sessionId]?.activeWindow?.layerOf(alert.blockId)?.minimized != true
-                if (!focused) {
-                    alertScope.launch {
-                        val result = alertHost.showSnackbar(alert.text, actionLabel = "Open", duration = SnackbarDuration.Short)
-                        if (result == SnackbarResult.ActionPerformed) {
-                            app.requestOpen(dev.compy.Selection(alert.serverId, alert.sessionId))
-                            app.revealPane(c, alert.sessionId, alert.blockId)
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     // The session may be ended from another device while it's open here.
     if (connection != null && sessionId != null) {
         val sessions by connection.sessions.collectAsStateWithLifecycle()
         val state by connection.state.collectAsStateWithLifecycle()
-        LaunchedEffect(sessions, state) {
+        LaunchedEffect(sessions, state, sessionId) {
             if (state == dev.compy.rex.ConnectionState.Connected && sessions.none { it.id == sessionId }) app.select(null)
         }
     }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        val compact = maxWidth < 600.dp
+        val compact = maxWidth < COMPACT_BELOW_DP.dp
         val sidebarWidth = if (maxWidth < 840.dp) 280.dp else 320.dp
-        LaunchedEffect(Unit) { app.openRequests.collect { onShowList(false) } }
+        LaunchedEffect(Unit) {
+            app.openRequests.collect {
+                onShowList(false)
+                // Handled once. Otherwise coming back from Settings replays it and leaves the list.
+                app.openRequestHandled()
+            }
+        }
         LaunchedEffect(sessionId) { if (sessionId == null) onShowList(true) }
         if (compact) {
             val inWorkspace = !showList && connection != null && sessionId != null
@@ -257,7 +277,10 @@ private fun MainLayout(
                             clip = p > 0f
                         },
                 ) {
-                    Workspace(app, workspaceConnection, workspaceSession, compact = true, onShowSidebar = { onShowList(true) }, onMessage = onMessage)
+                    // Keyed, so nothing a workspace remembers or a gesture captured outlives its session.
+                    key(workspaceConnection, workspaceSession) {
+                        Workspace(app, workspaceConnection, workspaceSession, compact = true, onShowSidebar = { onShowList(true) }, onMessage = onMessage)
+                    }
                 }
             }
         } else {
@@ -295,20 +318,21 @@ private fun MainLayout(
                         },
                 ) {
                     if (connection != null && sessionId != null) {
-                        Workspace(
-                            app, connection, sessionId, compact = false,
-                            sidebarHidden = !sidebarOpen,
-                            layoutMoving = open.isRunning,
-                            onShowSidebar = { onSidebarOpen(true) },
-                            onMessage = onMessage,
-                        )
+                        key(connection, sessionId) {
+                            Workspace(
+                                app, connection, sessionId, compact = false,
+                                sidebarHidden = !sidebarOpen,
+                                layoutMoving = open.isRunning,
+                                onShowSidebar = { onSidebarOpen(true) },
+                                onMessage = onMessage,
+                            )
+                        }
                     } else {
                         EmptyWorkspace()
                     }
                 }
             }
         }
-        SnackbarHost(alertHost, Modifier.align(Alignment.TopCenter).statusBarsPadding()) { Snackbar(it) }
     }
 }
 
@@ -328,10 +352,28 @@ private fun EmptyWorkspace() {
     }
 }
 
+/** Narrower than this, the session list and the workspace take turns instead of sitting side by side. */
+private const val COMPACT_BELOW_DP = 600
+
 private const val LOCK_AUTHENTICATORS = BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL
 
+/** Whether this device has a fingerprint, face or screen lock to unlock Compy with. */
 @Composable
-private fun LockScreen(app: AppState, activity: FragmentActivity) {
+internal fun rememberCanLock(activity: FragmentActivity): Boolean = remember(activity) {
+    BiometricManager.from(activity).canAuthenticate(LOCK_AUTHENTICATORS) == BiometricManager.BIOMETRIC_SUCCESS
+}
+
+/** Keeps a window out of screenshots and the recent apps list while the setting is on. */
+@Composable
+fun HideFromScreenshots(window: Window, hide: Boolean) {
+    LaunchedEffect(window, hide) {
+        if (hide) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE) else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    }
+}
+
+/** Asks for the fingerprint, face or screen lock, and stays in the way until it's given. */
+@Composable
+internal fun LockScreen(app: AppState, activity: FragmentActivity) {
     var attempt by remember { mutableStateOf(0) }
     LaunchedEffect(attempt) {
         val prompt = BiometricPrompt(

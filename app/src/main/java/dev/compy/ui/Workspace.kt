@@ -154,6 +154,13 @@ fun Workspace(
     val titles by connection.titles.collectAsStateWithLifecycle()
     val view = views[sessionId]
     val window = view?.activeWindow
+    val detachedPanes by connection.detached.collectAsStateWithLifecycle()
+    LaunchedEffect(view, detachedPanes) {
+        // Not before the layout has loaded, when every pane would look closed.
+        val known = view ?: return@LaunchedEffect
+        val open = known.windows.flatMap { w -> w.blocks.map { it.id } } + detachedPanes[sessionId].orEmpty().map { it.id }
+        controller.keepFeeds(open.toSet())
+    }
 
     var overview by rememberSaveable(sessionId) { mutableStateOf(false) }
     // 0 shows the window and 1 the overview, with the window shrinking into its card between them.
@@ -180,9 +187,10 @@ fun Workspace(
     controller.showMessage = onMessage
     val rootView = LocalView.current
     // A terminal bell is easy to miss on a phone, so feel it when it's from a pane on screen.
-    LaunchedEffect(connection) {
+    LaunchedEffect(connection, sessionId) {
         connection.bells.collect { block ->
-            if (window?.blocks?.any { it.id == block } == true) {
+            // Read when the bell rings: the window from when this started may be gone or changed.
+            if (connection.views.value[sessionId]?.activeWindow?.blocks?.any { it.id == block } == true) {
                 rootView.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
             }
         }
@@ -321,6 +329,10 @@ fun Workspace(
                         val down = awaitFirstDown()
                         spawn.pointer = down.position
                         spawn.armed = false
+                        // Left over from a pane dropped in the trash, which would draw this one there.
+                        spawn.moving = null
+                        spawn.dropped = false
+                        spawn.overTrash = false
                         rootView.performHapticFeedback(HapticFeedbackConstants.GESTURE_START)
                         try {
                             while (true) {
@@ -695,7 +707,8 @@ private fun ActionsMenu(
     val settings by controller.app.settings.collectAsStateWithLifecycle()
     val keepSize = (settings.sizeModes[sessionId] ?: SizeMode.TakeOver) == SizeMode.Keep
     val context = LocalContext.current
-    var uploadTo by remember { mutableStateOf<String?>(null) }
+    // Saved, because Android may recreate the activity while the file picker is open.
+    var uploadTo by rememberSaveable { mutableStateOf<String?>(null) }
     val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         val block = uploadTo ?: return@rememberLauncherForActivityResult
         if (uris.isEmpty()) return@rememberLauncherForActivityResult

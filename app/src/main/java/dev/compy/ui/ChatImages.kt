@@ -69,8 +69,8 @@ private val thumbnails = object : LruCache<String, ImageBitmap>(24 * 1024 * 1024
     override fun sizeOf(key: String, value: ImageBitmap) = value.width * value.height * 4
 }
 
-private const val THUMB_SIDE = 480
-private const val FULL_SIDE = 2560
+private const val THUMB_SIDE = 960
+private const val FULL_SIDE = 4096
 
 /** Decodes an image no larger than [maxSide] on its longer side, to keep big screenshots cheap. */
 private fun decode(bytes: ByteArray, maxSide: Int): ImageBitmap? {
@@ -78,7 +78,9 @@ private fun decode(bytes: ByteArray, maxSide: Int): ImageBitmap? {
     BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
     var sample = 1
-    while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxSide) sample *= 2
+    // Until it fits. Stopping a step early let through twice the side, and a 5000-pixel
+    // screenshot opened full screen as a 100 MB bitmap.
+    while (maxOf(bounds.outWidth, bounds.outHeight) / sample > maxSide) sample *= 2
     val options = BitmapFactory.Options().apply { inSampleSize = sample }
     return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
 }

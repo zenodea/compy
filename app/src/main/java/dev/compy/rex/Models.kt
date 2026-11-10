@@ -130,6 +130,15 @@ data class ProgramStatus(
     val isWorking get() = state == "working"
     val isDone get() = state == "done"
     val isError get() = state == "error"
+
+    /** What a blocked program is waiting for, to follow its name: "needs your permission". */
+    val blockedReason: String
+        get() = when (kind) {
+            "permission" -> "needs your permission"
+            "question" -> "has a question"
+            "auth" -> "needs a password"
+            else -> "needs you"
+        }
 }
 
 data class HostEntry(val id: String, val label: String, val endpoint: String)

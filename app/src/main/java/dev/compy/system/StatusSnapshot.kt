@@ -4,12 +4,15 @@ import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Context
 import android.service.quicksettings.TileService
+import android.text.format.DateUtils
 import dev.compy.AppState
 import dev.compy.rex.ConnectionState
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -24,6 +27,15 @@ data class StatusSnapshot(
     val sessions: Int = 0,
     val lines: List<String> = emptyList(),
 ) {
+    /** "2 need you", "3 working" or "4 sessions". Null before anything was saved. */
+    val summary: String?
+        get() = when {
+            savedAt == 0L -> null
+            blocked > 0 -> "$blocked need you"
+            working > 0 -> "$working working"
+            else -> "$sessions sessions"
+        }
+
     companion object {
         private const val PREFS = "status"
         private const val KEY = "snapshot"
@@ -38,15 +50,14 @@ data class StatusSnapshot(
                 .putString(KEY, Json.encodeToString(snapshot)).apply()
         }
 
-        fun age(snapshot: StatusSnapshot, now: Long = System.currentTimeMillis()): String {
+        /**
+         * When the snapshot was saved, as a date and time. The widget is drawn when a snapshot is
+         * saved and then sits unchanged, so an age such as "just now" would be wrong within minutes.
+         */
+        fun updated(context: Context, snapshot: StatusSnapshot): String {
             if (snapshot.savedAt == 0L) return "Open Compy to update"
-            val minutes = (now - snapshot.savedAt) / 60_000
-            return when {
-                minutes < 1 -> "Updated just now"
-                minutes < 60 -> "Updated $minutes min ago"
-                minutes < 60 * 24 -> "Updated ${minutes / 60} h ago"
-                else -> "Updated ${minutes / (60 * 24)} d ago"
-            }
+            val flags = DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_ABBREV_ALL
+            return "Updated ${DateUtils.formatDateTime(context, snapshot.savedAt, flags)}"
         }
     }
 }
@@ -61,11 +72,15 @@ class StatusPublisher(private val context: Context, private val app: AppState) {
             dirty.debounce(1_500).collect { publish() }
         }
         app.scope.launch {
-            app.connections.collect { map ->
-                map.values.forEach { c ->
-                    app.scope.launch { c.statuses.collect { dirty.value++ } }
-                    app.scope.launch { c.views.collect { dirty.value++ } }
-                    app.scope.launch { c.state.collect { dirty.value++ } }
+            // collectLatest ends the watchers of the previous set of servers. Without that, every
+            // change to the list added three more per server and kept removed servers alive.
+            app.connections.collectLatest { map ->
+                coroutineScope {
+                    map.values.forEach { c ->
+                        launch { c.statuses.collect { dirty.update { it + 1 } } }
+                        launch { c.views.collect { dirty.update { it + 1 } } }
+                        launch { c.state.collect { dirty.update { it + 1 } } }
+                    }
                 }
             }
         }

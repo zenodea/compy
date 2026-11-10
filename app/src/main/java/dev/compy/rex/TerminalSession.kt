@@ -69,8 +69,8 @@ class TerminalSession(
     private var retryJob: Job? = null
     private var retries = 0
     private var stopped = false
-    private var theme: TerminalColors? = null
-    private var localTheme: TerminalColors? = null
+    @Volatile private var theme: TerminalColors? = null
+    @Volatile private var localTheme: TerminalColors? = null
 
     fun addListener(l: Listener) {
         listeners += l
@@ -122,6 +122,9 @@ class TerminalSession(
     /** Drops the socket without ending the stream, so it can resume within the server's window. */
     @Synchronized
     fun pause() {
+        // Cancelling a socket reports a failure. A new generation makes that report stale, so it
+        // doesn't schedule a retry that would reopen the stream half a second later.
+        generation++
         retryJob?.cancel()
         socket?.cancel()
         socket = null
@@ -165,7 +168,13 @@ class TerminalSession(
                 token = null
                 val hello = ByteArray(17)
                 hello[0] = HELLO
-                Base64.decode(ticket, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP).copyInto(hello, 1)
+                try {
+                    Base64.decode(ticket, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP).copyInto(hello, 1)
+                } catch (e: RuntimeException) {
+                    // Not base64, or longer than a ticket: ask for another rather than crash.
+                    scheduleRetry(gen, fresh = true)
+                    return@launch
+                }
                 connect(gen, hello)
             }
         }
@@ -213,6 +222,7 @@ class TerminalSession(
 
     private inner class DataListener(val gen: Int, val handshake: ByteArray) : WebSocketListener() {
         private var welcomed = false
+        private var closeHandled = false
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
             webSocket.send(handshake.toByteString())
@@ -222,13 +232,15 @@ class TerminalSession(
             synchronized(this@TerminalSession) {
                 if (gen != generation) return
                 val data = bytes.toByteArray()
-                if (!welcomed) {
+                if (welcomed) {
+                    received += data.size
+                    parser?.feed(data)
+                } else {
                     handshakeReply(webSocket, data)
-                    return
                 }
-                received += data.size
-                parser?.feed(data)
             }
+            // Also after the handshake: a resumed stream may send nothing more for a long time,
+            // and the pane would keep saying it's reconnecting.
             changed()
         }
 
@@ -257,11 +269,14 @@ class TerminalSession(
                     // A refused RESUME or HELLO means starting over with a new ticket.
                     token = null
                     parser = null
+                    // Cancelling reports a failure, which mustn't be taken for a dropped connection.
+                    // That scheduled a second retry, and retried a block with no terminal for ever.
+                    closeHandled = true
                     webSocket.cancel()
                     val reason = if (data.size > 1) data[1].toInt() else 0
                     if (reason == REJECT_UNAVAILABLE && !childExited && terminal == null) {
                         state = State.Closed
-                        changed()
+                        socket = null
                     } else {
                         scheduleRetry(gen, fresh = true)
                     }
@@ -280,7 +295,9 @@ class TerminalSession(
 
         private fun handleClose(code: Int) {
             synchronized(this@TerminalSession) {
-                if (gen != generation || stopped) return
+                // A close arrives as closing and then closed, and each would schedule a retry.
+                if (closeHandled || gen != generation || stopped) return
+                closeHandled = true
                 when (code) {
                     CLOSE_BLOCK_CLOSED, 1000 -> {
                         state = State.Closed
@@ -354,6 +371,14 @@ data class TerminalColors(
     /** "light" or "dark" when the host says; otherwise worked out from the background. */
     val scheme: String? = null,
 ) {
+    // Arrays compare by identity, which would make every theme a terminal reports look new.
+    override fun equals(other: Any?): Boolean = this === other || other is TerminalColors &&
+        foreground == other.foreground && background == other.background && cursor == other.cursor &&
+        scheme == other.scheme && palette.contentEquals(other.palette)
+
+    override fun hashCode(): Int =
+        31 * (31 * (31 * (31 * foreground + background) + cursor) + palette.contentHashCode()) + scheme.hashCode()
+
     companion object {
         private fun hex(s: String?): Int {
             val clean = s?.trim()?.removePrefix("#") ?: return 0

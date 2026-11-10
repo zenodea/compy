@@ -1,13 +1,15 @@
 package dev.compy.rex
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -50,6 +52,8 @@ class TranscriptFeed(
     private var start = 0L
     private var stop = 0L
     private var raw: List<ChatEntry> = emptyList()
+    /** True once the oldest entries were dropped to stay within [MAX_ENTRIES], so [start] no longer says where they begin. */
+    private var trimmed = false
 
     private val imageBytes = object : android.util.LruCache<String, ByteArray>(IMAGE_CACHE_BYTES) {
         override fun sizeOf(key: String, value: ByteArray) = value.size
@@ -62,7 +66,15 @@ class TranscriptFeed(
     suspend fun image(image: ChatImage): ByteArray? {
         val key = imageKey(image)
         imageBytes.get(key)?.let { return it }
-        val bytes = runCatching { connection.readTranscriptImage(sessionId, blockId, image) }.getOrNull() ?: return null
+        val bytes = try {
+            connection.readTranscriptImage(sessionId, blockId, image)
+        } catch (e: TimeoutCancellationException) {
+            null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        } ?: return null
         imageBytes.put(key, bytes)
         return bytes
     }
@@ -74,17 +86,16 @@ class TranscriptFeed(
     suspend fun run() {
         while (true) {
             poll()
-            val until = System.currentTimeMillis() + POLL_MS
-            while (System.currentTimeMillis() < until && !nudged) delay(100)
-            nudged = false
+            withTimeoutOrNull(POLL_MS) { nudges.receive() }
         }
     }
 
-    @Volatile private var nudged = false
+    /** Holds at most one request to read early, so waiting costs nothing until one arrives. */
+    private val nudges = Channel<Unit>(Channel.CONFLATED)
 
     /** Reads again soon, such as right after sending a message. */
     fun nudge() {
-        nudged = true
+        nudges.trySend(Unit)
     }
 
     private suspend fun poll() = lock.withLock {
@@ -103,7 +114,9 @@ class TranscriptFeed(
             if (fresh) start = chunkStart
             stop = result["stop"].long() ?: stop
             val entries = parse(result, chunkStart)
-            raw = (if (fresh) entries else raw + entries).takeLast(MAX_ENTRIES)
+            val all = if (fresh) entries else raw + entries
+            if (all.size > MAX_ENTRIES) trimmed = true
+            raw = all.takeLast(MAX_ENTRIES)
             publish(Status.Live)
             return@withLock
         }
@@ -111,7 +124,7 @@ class TranscriptFeed(
 
     /** Reads the lines before the oldest ones loaded. */
     suspend fun loadOlder() {
-        if (start <= 0 || _state.value.loadingOlder) return
+        if (start <= 0 || trimmed || _state.value.loadingOlder) return
         _state.update { it.copy(loadingOlder = true) }
         try {
             lock.withLock {
@@ -119,7 +132,12 @@ class TranscriptFeed(
                 val result = fetch(before = before) ?: return@withLock
                 if (result["session"].str() != session) return@withLock
                 start = result["start"].long() ?: 0L
-                raw = parse(result, start) + raw
+                // Keep within the cap here. The next read would otherwise drop these lines again
+                // while start still pointed before them, leaving a hole in the conversation.
+                val older = parse(result, start)
+                val room = MAX_ENTRIES - raw.size
+                if (older.size > room) trimmed = true
+                raw = older.takeLast(maxOf(0, room)) + raw
                 publish(Status.Live)
             }
         } finally {
@@ -132,6 +150,7 @@ class TranscriptFeed(
         start = 0
         stop = 0
         raw = emptyList()
+        trimmed = false
     }
 
     private fun parse(result: JsonObject, chunkStart: Long): List<ChatEntry> {
@@ -142,7 +161,7 @@ class TranscriptFeed(
     }
 
     private fun publish(status: Status) {
-        _state.update { it.copy(status = status, entries = joinResults(raw), hasOlder = start > 0) }
+        _state.update { it.copy(status = status, entries = joinResults(raw), hasOlder = start > 0 && !trimmed) }
     }
 
     /** One read. Returns null, after setting the status, when there is nothing to show. */
