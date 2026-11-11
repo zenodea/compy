@@ -1,10 +1,12 @@
 -- Compy for Rex: lets the Compy app show an agent's conversation as a chat.
 --
--- Add this file next to your init.lua and load it from there:
+-- The app's chat screen copies a command that installs this file. By hand: put
+-- it next to your init.lua and load it from there:
 --
---   dofile(os.getenv("HOME") .. "/.config/rex/compy.lua")
+--   pcall(dofile, os.getenv("HOME") .. "/.config/rex/compy.lua")
 --
--- then reload (C-a r, or `rex config reload`). It adds three actions:
+-- then reload (`rex config reload`). The pcall keeps the rest of init.lua
+-- working on a machine that doesn't have this file. It adds three actions:
 -- compy_transcript finds the transcript of the agent running in a pane and
 -- returns part of it, with images left out and referenced by position;
 -- compy_image returns one of those images, in parts; and compy_images lists

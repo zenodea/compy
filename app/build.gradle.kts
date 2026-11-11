@@ -20,8 +20,8 @@ android {
         applicationId = "dev.compy"
         minSdk = 34
         targetSdk = 36
-        versionCode = 16
-        versionName = "0.2.11"
+        versionCode = 17
+        versionName = "0.2.12"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         externalNativeBuild {
             cmake {
@@ -84,6 +84,9 @@ android {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
     }
+
+    // compy.lua goes into the app, which hands it to the host inside its chat setup command.
+    sourceSets { getByName("main") { assets.srcDir(rootProject.file("rex")) } }
 
     packaging { jniLibs { useLegacyPackaging = false } }
     androidResources { noCompress += "ttf" }

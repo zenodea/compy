@@ -33,6 +33,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -80,9 +81,6 @@ import kotlinx.coroutines.launch
 
 /** Agents whose conversations Compy can read, by icon name (see [ProgramNames]). */
 internal val CHAT_AGENTS = setOf("claude")
-
-/** The line to add to the host's init.lua, after copying rex/compy.lua next to it. */
-internal const val COMPY_LUA_LINE = """dofile(os.getenv("HOME") .. "/.config/rex/compy.lua")"""
 
 /**
  * An agent's conversation as a chat, read from its transcript on the host, with a box to send it
@@ -417,35 +415,29 @@ private fun Banner(message: String) {
 private fun SetupNeeded(controller: WorkspaceController, modifier: Modifier) {
     val scheme = MaterialTheme.colorScheme
     Column(
-        modifier.fillMaxWidth().padding(24.dp),
+        // It scrolls, so the button stays in reach in a short pane or above the keyboard.
+        modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
     ) {
         Text("Set up chat on this host", style = MaterialTheme.typography.titleMedium, color = scheme.onSurface)
         Text(
-            "Compy reads the agent's conversation through a small Rex action. On the computer running Rex:\n\n" +
-                "1. Copy rex/compy.lua from the Compy repo to ~/.config/rex/\n" +
-                "2. Add this line to ~/.config/rex/init.lua\n" +
-                "3. Reload the config (rex config reload)",
+            "Compy reads an agent's conversation through a small Rex action, which the computer running Rex has to load.\n\n" +
+                "1. Tap Copy command.\n" +
+                "2. Paste it into a shell on that computer and press Enter. A shell pane here in Compy works.\n" +
+                "3. Come back to this pane. The chat shows up by itself.",
             style = MaterialTheme.typography.bodyMedium,
             color = scheme.onSurfaceVariant,
         )
-        Text(
-            COMPY_LUA_LINE,
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .background(scheme.surfaceContainerHighest)
-                .horizontalScroll(rememberScrollState())
-                .padding(10.dp),
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            softWrap = false,
-        )
-        OutlinedButton(onClick = { controller.copy(COMPY_LUA_LINE) }) {
+        Button(onClick = { controller.copyHostSetup() }) {
             Icon(Icons.Rounded.ContentCopy, null, Modifier.size(16.dp))
             Spacer(Modifier.size(8.dp))
-            Text("Copy line")
+            Text("Copy command")
         }
+        Text(
+            "The command saves compy.lua in ~/.config/rex, loads it from init.lua and reloads Rex's config.",
+            style = MaterialTheme.typography.bodySmall,
+            color = scheme.onSurfaceVariant,
+        )
     }
 }
 

@@ -16,6 +16,7 @@ import dev.compy.data.SizeMode
 import dev.compy.rex.RexKey
 import dev.compy.rex.ServerConnection
 import dev.compy.rex.TranscriptFeed
+import dev.compy.rex.hostSetupCommand
 import dev.compy.term.TerminalView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -144,6 +145,11 @@ class WorkspaceController(
 
     fun copy(text: String) {
         context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Terminal", text))
+    }
+
+    /** Copies the shell command that sets this server's computer up for agent chat. */
+    fun copyHostSetup() {
+        copy(hostSetupCommand(context.assets.open("compy.lua").use { it.readBytes() }))
     }
 
     fun press(def: KeyDef) {

@@ -54,11 +54,13 @@ Sending files to a pane needs Rex with API revision 11 or later on the host.
 ### Agent chat
 
 Rex doesn't share agents' conversations with clients, so Compy reads them through a small action
-on the host. Copy [`rex/compy.lua`](rex/compy.lua) next to your `init.lua` and load it:
+on the host. Open an agent's chat in Compy, tap **Copy command**, and run what it copies in a
+shell on the host. Or do the same by hand with [`rex/compy.lua`](rex/compy.lua), from a clone of
+this repository:
 
 ```sh
 cp rex/compy.lua ~/.config/rex/compy.lua
-echo 'dofile(os.getenv("HOME") .. "/.config/rex/compy.lua")' >> ~/.config/rex/init.lua
+echo 'pcall(dofile, os.getenv("HOME") .. "/.config/rex/compy.lua")' >> ~/.config/rex/init.lua
 rex config reload
 ```
 
