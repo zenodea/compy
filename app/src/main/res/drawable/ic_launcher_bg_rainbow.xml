@@ -2,4 +2,5 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android" xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
 <path android:pathData="M0,0 h108 v108 h-108 Z"><aapt:attr name="android:fillColor"><gradient android:type="linear" android:startX="14" android:startY="98" android:endX="96" android:endY="10"><item android:offset="0" android:color="#39C8FF"/><item android:offset="0.27" android:color="#8F5BFF"/><item android:offset="0.52" android:color="#F0509C"/><item android:offset="0.77" android:color="#FF8A2A"/><item android:offset="1" android:color="#FFD640"/></gradient></aapt:attr></path>
+<path android:pathData="M0,0 h108 v108 h-108 Z"><aapt:attr name="android:fillColor"><gradient android:type="radial" android:centerX="30" android:centerY="26" android:gradientRadius="46"><item android:offset="0" android:color="#38FFFFFF"/><item android:offset="1" android:color="#00FFFFFF"/></gradient></aapt:attr></path>
 </vector>
