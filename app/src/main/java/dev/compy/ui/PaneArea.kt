@@ -30,6 +30,9 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxSize
@@ -1065,6 +1068,7 @@ private fun BoxScope.ArrangeOverlay(
 }
 
 /** One terminal pane: the rounded surface, the terminal view and any connection notice. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun TerminalPane(
     controller: WorkspaceController,
@@ -1094,6 +1098,10 @@ fun TerminalPane(
     // Remembered with the app, not with this screen: a pane comes back as it was last seen.
     val chat = agent != null && app.chatShown(blockId, settings)
     val keyboard = LocalSoftwareKeyboardController.current
+    // A pane showing its chat keeps its terminal at the pane's full size on the server. Typing
+    // in the chat makes the pane smaller on the phone, and that is the one change of size the
+    // server isn't told about.
+    val chatKeyboardUp = chat && WindowInsets.isImeVisible
     val terminalLook = remember(settings) { settings.terminalLook() }
     // A pane that is still connecting shows the color its terminal will have, not black.
     val hostColors by controller.connection.hostTheme.collectAsStateWithLifecycle()
@@ -1129,6 +1137,7 @@ fun TerminalPane(
             },
             update = { view ->
                 view.interactive = interactive && !chat
+                view.sizing = interactive && !chatKeyboardUp
                 view.topSpace = if (handleSpace) with(density) { look.handleSpace.toPx() } else 0f
                 view.keepSize = settings.sizeModes[controller.sessionId] == SizeMode.Keep
                 view.paneFocused = focused && interactive && !chat

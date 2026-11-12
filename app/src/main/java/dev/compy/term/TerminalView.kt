@@ -63,6 +63,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         fun onTapped()
         /** The grid that fits this view at the current font size. */
         fun onGridMeasured(cols: Int, rows: Int, cellW: Int, cellH: Int)
+        /** The view's size stopped counting, so a size on its way to the server should not be sent. */
+        fun onGridHeld() = Unit
         fun onFontSizeChanged(sizeSp: Float)
         fun copyText(text: String)
         fun clipboardText(): String?
@@ -82,6 +84,20 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             // Sizes aren't reported while this is off, so one that changed meanwhile was missed.
             if (value && !was) reportGrid()
         }
+    /**
+     * Whether the terminal follows this view's size. Null leaves it to [interactive], which is
+     * right for a pane showing its terminal. A pane showing its chat sets it itself: the terminal
+     * under the chat can't be typed into, but it still has the pane's size, and it must not take
+     * the smaller size the pane has while the chat's keyboard is up.
+     */
+    var sizing: Boolean? = null
+        set(value) {
+            val was = reportsSize
+            field = value
+            if (reportsSize && !was) reportGrid() else if (!reportsSize && was) host?.onGridHeld()
+        }
+    private val reportsSize get() = sizing ?: interactive
+
     /**
      * True for a saved pane, which can be scrolled, searched and copied from but has nothing to
      * type into: no keyboard comes up, and scrolling always moves through its own history.
@@ -324,7 +340,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     }
 
     private fun reportGrid() {
-        if (width <= 0 || height <= 0 || !interactive) return
+        if (width <= 0 || height <= 0 || !reportsSize) return
         val avail = width - padding * 2
         val availH = height - padding - padTop
         val cols = max(2, floor(avail / cellW).toInt())

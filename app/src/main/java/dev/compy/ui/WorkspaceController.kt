@@ -333,6 +333,12 @@ class WorkspaceController(
         }
 
         // A pinch sizes this pane alone. The newest hundred are kept, since panes come and go.
+        // A size measured while the chat's keyboard was sliding in must not follow it to the server.
+        override fun onGridHeld() {
+            sizeJobs.remove(blockId)?.cancel()
+            fitted[blockId]?.let { grids[blockId] = it }
+        }
+
         override fun onFontSizeChanged(sizeSp: Float) {
             app.updateSettings { s ->
                 val sizes = (s.paneFontSizes - blockId) + (blockId to sizeSp)
