@@ -1091,7 +1091,8 @@ fun TerminalPane(
     val statusApp = statuses[blockId]?.app
     val process = programs[blockId]
     val agent = remember(statusApp, process) { ProgramNames.candidates(statusApp, process).firstOrNull { it in CHAT_AGENTS } }
-    val chat = agent != null && controller.chatShown[blockId] == true
+    // Remembered with the app, not with this screen: a pane comes back as it was last seen.
+    val chat = agent != null && app.chatShown(blockId, settings)
     val keyboard = LocalSoftwareKeyboardController.current
     val terminalLook = remember(settings) { settings.terminalLook() }
     // A pane that is still connecting shows the color its terminal will have, not black.
@@ -1145,7 +1146,7 @@ fun TerminalPane(
             AgentChat(
                 controller,
                 blockId,
-                onShowTerminal = { controller.chatShown[blockId] = false },
+                onShowTerminal = { app.setChatShown(blockId, false) },
                 modifier = Modifier.fillMaxSize().padding(top = if (handleSpace) look.handleSpace else 0.dp),
             )
         }
@@ -1155,7 +1156,7 @@ fun TerminalPane(
                 onClick = {
                     // The terminal's keyboard would otherwise stay up over the chat.
                     if (!chat) keyboard?.hide()
-                    controller.chatShown[blockId] = !chat
+                    app.setChatShown(blockId, !chat)
                     latestTap.value()
                 },
                 modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),

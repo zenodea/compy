@@ -45,8 +45,6 @@ class WorkspaceController(
 
     var focusedBlockId by mutableStateOf<String?>(null)
 
-    /** Agent panes showing their conversation as a chat instead of the terminal. */
-    val chatShown = mutableStateMapOf<String, Boolean>()
     private val feeds = HashMap<String, TranscriptFeed>()
 
     /** The conversation of the agent in a pane, kept while the session is open so switching back is instant. */

@@ -74,6 +74,10 @@ data class Settings(
     val tapMovesCursor: Boolean = true,
     /** Ask before pasting several lines into a program that would run each as it arrives. */
     val pasteWarning: Boolean = true,
+    /** The agent board lists each column's cards under the names of their sessions. */
+    val boardBySession: Boolean = false,
+    /** Agent panes last seen as a chat rather than a terminal, by block. */
+    val chatPanes: Set<String> = emptySet(),
     /** Keep the screen on while an agent in a pane on screen is working. */
     val keepScreenOn: Boolean = false,
     /** Messages sent from the composer, newest first, to send again. */

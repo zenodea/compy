@@ -17,6 +17,8 @@ typedef struct {
   GhosttyRenderStateImageIterator images;
   /* Rows asked for above the screen. */
   int above;
+  /* What the last frame said about the cursor, scrolling and modes, to tell when only they changed. */
+  jint last[32];
 } Term;
 
 enum {
@@ -234,7 +236,6 @@ JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeRender(
   if (ghostty_render_state_update(h->rs, h->term) != GHOSTTY_SUCCESS) return JNI_FALSE;
   GhosttyRenderStateDirty dirty = GHOSTTY_RENDER_STATE_DIRTY_FALSE;
   ghostty_render_state_get(h->rs, GHOSTTY_RENDER_STATE_DATA_DIRTY, &dirty);
-  if (!force && dirty == GHOSTTY_RENDER_STATE_DIRTY_FALSE) return JNI_FALSE;
 
   jint meta[META_COUNT];
   memset(meta, 0, sizeof(meta));
@@ -280,6 +281,18 @@ JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeRender(
   bracket.mode = GHOSTTY_MODE_BRACKETED_PASTE;
   ghostty_terminal_get(h->term, GHOSTTY_TERMINAL_DATA_MODE, &bracket);
   meta[META_BRACKETED] = bracket.value;
+
+  /* "Not dirty" is about the text only. The cursor can move with no cell changing, as it does
+   * for an arrow key, or for a space typed over a blank a program had already drawn, and so can
+   * the scroll position and the modes. Those frames carry the same cells, so only this is sent. */
+  if (!force && dirty == GHOSTTY_RENDER_STATE_DIRTY_FALSE) {
+    meta[META_EXTRAS_LEN] = h->last[META_EXTRAS_LEN];
+    meta[META_ABOVE] = h->last[META_ABOVE];
+    if (memcmp(meta, h->last, sizeof(meta)) == 0) return JNI_FALSE;
+    memcpy(h->last, meta, sizeof(meta));
+    (*env)->SetIntArrayRegion(env, metaArr, 0, META_COUNT, meta);
+    return JNI_TRUE;
+  }
 
   jsize cap = (*env)->GetArrayLength(env, cellsArr);
   jsize extrasCap = (*env)->GetArrayLength(env, extrasArr);
@@ -377,6 +390,7 @@ JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeRender(
     (*env)->ReleasePrimitiveArrayCritical(env, cellsArr, out, 0);
   }
   meta[META_EXTRAS_LEN] = extrasLen;
+  memcpy(h->last, meta, sizeof(meta));
   (*env)->SetIntArrayRegion(env, metaArr, 0, META_COUNT, meta);
   ghostty_render_state_clean(h->rs);
   return JNI_TRUE;

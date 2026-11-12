@@ -328,6 +328,27 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
         scope.launch { store.updateSettings(change) }
     }
 
+    /**
+     * Choices made since the app started about showing an agent pane as a chat. They are saved
+     * too, but saving takes a moment, and the button should answer the tap at once. Kept here
+     * and not with a screen, so the choice outlives the screen being built again, as it is when
+     * a foldable opens or closes.
+     */
+    private val chatChoices = androidx.compose.runtime.mutableStateMapOf<String, Boolean>()
+
+    /** Whether a pane was last seen as a chat. Reads [settings], so pass the value a screen collected. */
+    fun chatShown(blockId: String, saved: Settings): Boolean = chatChoices[blockId] ?: (blockId in saved.chatPanes)
+
+    /** Remembers whether a pane shows its chat or its terminal, for next time and across restarts. */
+    fun setChatShown(blockId: String, shown: Boolean) {
+        chatChoices[blockId] = shown
+        updateSettings { s ->
+            val panes = if (shown) (s.chatPanes - blockId) + blockId else s.chatPanes - blockId
+            // The newest couple of hundred, since panes come and go.
+            s.copy(chatPanes = if (panes.size > MAX_CHAT_PANES) panes.drop(panes.size - MAX_CHAT_PANES).toSet() else panes)
+        }
+    }
+
     override fun onStart(owner: LifecycleOwner) {
         _foreground.value = true
         pauseJob?.cancel()
@@ -364,5 +385,6 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
         private const val LOCK_AFTER_MS = 60_000L
         private const val OPEN_TIMEOUT_MS = 20_000L
         const val BuildConfigVersion = dev.compy.BuildConfig.VERSION_NAME
+        private const val MAX_CHAT_PANES = 200
     }
 }
