@@ -1,5 +1,9 @@
 package dev.compy.system
 
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
@@ -45,21 +49,59 @@ class WatchService : Service() {
             return START_NOT_STICKY
         }
         app.setWatching(true)
+        follow(app)
         return START_STICKY
     }
 
+    private var following: kotlinx.coroutines.Job? = null
+    private var shown: AgentSummary.Notice? = null
+
+    /**
+     * Keeps the ongoing notification saying what the agents are doing: how many need you or are
+     * at work, and a bar for work that reports how far along it is. It is written again only
+     * when what it says changes, and no more often than every second and a half.
+     */
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
+    private fun follow(app: dev.compy.AppState) {
+        if (following?.isActive == true) return
+        following = app.scope.launch {
+            val dirty = kotlinx.coroutines.flow.MutableStateFlow(0)
+            launch {
+                app.connections.collectLatest { map ->
+                    kotlinx.coroutines.coroutineScope {
+                        map.values.forEach { c ->
+                            launch { c.statuses.collect { dirty.update { it + 1 } } }
+                            launch { c.progress.collect { dirty.update { it + 1 } } }
+                        }
+                    }
+                }
+            }
+            dirty.debounce(1_500).collect {
+                val notice = AgentSummary.notice(agents(app))
+                if (notice != shown) {
+                    shown = notice
+                    runCatching {
+                        getSystemService(android.app.NotificationManager::class.java).notify(ONGOING_ID, ongoing(notice))
+                    }
+                }
+            }
+        }
+    }
+
     private fun stopWatching(app: dev.compy.AppState) {
+        following?.cancel()
         app.setWatching(false)
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     override fun onDestroy() {
+        following?.cancel()
         (application as CompyApp).state.setWatching(false)
         super.onDestroy()
     }
 
-    private fun ongoing(): Notification {
+    private fun ongoing(notice: AgentSummary.Notice = shown ?: AgentSummary.notice(emptyList())): Notification {
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
@@ -70,8 +112,10 @@ class WatchService : Service() {
         )
         return NotificationCompat.Builder(this, AlertChannels.WATCHING)
             .setSmallIcon(R.drawable.ic_tile)
-            .setContentTitle("Watching your Rex servers")
-            .setContentText("Compy will alert you when an agent needs you")
+            .setContentTitle(notice.title)
+            .setContentText(notice.text)
+            .apply { if (notice.percent != null) setProgress(100, notice.percent, false) }
+            .setOnlyAlertOnce(true)
             .setContentIntent(open)
             .addAction(0, "Stop until next open", stop)
             .setOngoing(true)

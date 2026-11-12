@@ -14,15 +14,69 @@
         android:textAppearance="@android:style/TextAppearance.Material.Title"
         android:textColor="@android:color/system_accent1_100" />
 
-    <TextView
-        android:id="@+id/widget_lines"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_marginTop="6dp"
         android:layout_weight="1"
-        android:ellipsize="end"
-        android:textAppearance="@android:style/TextAppearance.Material.Body1"
-        android:textColor="@android:color/system_neutral1_100" />
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/widget_row_1"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:minHeight="28dp"
+            android:gravity="center_vertical"
+            android:textAppearance="@android:style/TextAppearance.Material.Body1"
+            android:textColor="@android:color/system_neutral1_100" />
+
+        <TextView
+            android:id="@+id/widget_row_2"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:minHeight="28dp"
+            android:gravity="center_vertical"
+            android:textAppearance="@android:style/TextAppearance.Material.Body1"
+            android:textColor="@android:color/system_neutral1_100" />
+
+        <TextView
+            android:id="@+id/widget_row_3"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:minHeight="28dp"
+            android:gravity="center_vertical"
+            android:textAppearance="@android:style/TextAppearance.Material.Body1"
+            android:textColor="@android:color/system_neutral1_100" />
+
+        <TextView
+            android:id="@+id/widget_row_4"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:minHeight="28dp"
+            android:gravity="center_vertical"
+            android:textAppearance="@android:style/TextAppearance.Material.Body1"
+            android:textColor="@android:color/system_neutral1_100" />
+
+        <TextView
+            android:id="@+id/widget_row_5"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:minHeight="28dp"
+            android:gravity="center_vertical"
+            android:textAppearance="@android:style/TextAppearance.Material.Body1"
+            android:textColor="@android:color/system_neutral1_100" />
+
+    </LinearLayout>
 
     <TextView
         android:id="@+id/widget_age"
