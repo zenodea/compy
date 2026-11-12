@@ -28,6 +28,8 @@ class TranscriptFeed(
         data object Live : Status
         /** The host's Rex config doesn't load compy.lua. */
         data object NotInstalled : Status
+        /** The host's compy.lua is older than this app and may not know the agent in the pane. */
+        data object Outdated : Status
         /** Nothing Compy knows how to read is running in the pane. */
         data object NoAgent : Status
         data class Unsupported(val agent: String) : Status
@@ -170,7 +172,9 @@ class TranscriptFeed(
         if (result == null) return failed("The host sent no conversation")
         if ((result["available"] as? JsonPrimitive)?.booleanOrNull != true) {
             reset()
-            _state.value = State(status = Status.NoAgent)
+            // An older compy.lua knows fewer agents, so "no agent" from it may only mean "none I know".
+            val old = (result["version"].int() ?: 0) < COMPY_LUA_VERSION
+            _state.value = State(status = if (old) Status.Outdated else Status.NoAgent)
             return null
         }
         val agent = result["agent"].str().orEmpty()
@@ -195,9 +199,11 @@ class TranscriptFeed(
         return null
     }
 
-    private companion object {
-        const val POLL_MS = 1_500L
-        const val MAX_ENTRIES = 4_000
-        const val IMAGE_CACHE_BYTES = 16 * 1024 * 1024
+    companion object {
+        /** The version of compy.lua this app carries, which knows Claude Code, Codex and Pi. */
+        const val COMPY_LUA_VERSION = 3
+        private const val POLL_MS = 1_500L
+        private const val MAX_ENTRIES = 4_000
+        private const val IMAGE_CACHE_BYTES = 16 * 1024 * 1024
     }
 }

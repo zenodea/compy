@@ -80,7 +80,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
 /** Agents whose conversations Compy can read, by icon name (see [ProgramNames]). */
-internal val CHAT_AGENTS = setOf("claude")
+internal val CHAT_AGENTS = dev.compy.rex.CHAT_AGENT_NAMES
 
 /**
  * An agent's conversation as a chat, read from its transcript on the host, with a box to send it
@@ -115,7 +115,8 @@ fun AgentChat(
     Column(Modifier.fillMaxSize()) {
         when (val s = state.status) {
             TranscriptFeed.Status.Loading -> Centered(Modifier.weight(1f)) { CircularProgressIndicator(Modifier.size(28.dp)) }
-            TranscriptFeed.Status.NotInstalled -> SetupNeeded(controller, Modifier.weight(1f))
+            TranscriptFeed.Status.NotInstalled -> SetupNeeded(controller, update = false, Modifier.weight(1f))
+            TranscriptFeed.Status.Outdated -> SetupNeeded(controller, update = true, Modifier.weight(1f))
             TranscriptFeed.Status.NoAgent -> Centered(Modifier.weight(1f)) {
                 Explain("No agent Compy can read is running in this pane.", onShowTerminal)
             }
@@ -412,16 +413,20 @@ private fun Banner(message: String) {
 
 /** What to do on a host whose Rex config doesn't load compy.lua yet. */
 @Composable
-private fun SetupNeeded(controller: WorkspaceController, modifier: Modifier) {
+private fun SetupNeeded(controller: WorkspaceController, update: Boolean, modifier: Modifier) {
     val scheme = MaterialTheme.colorScheme
     Column(
         // It scrolls, so the button stays in reach in a short pane or above the keyboard.
         modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
     ) {
-        Text("Set up chat on this host", style = MaterialTheme.typography.titleMedium, color = scheme.onSurface)
+        Text(if (update) "Update chat on this host" else "Set up chat on this host", style = MaterialTheme.typography.titleMedium, color = scheme.onSurface)
         Text(
-            "Compy reads an agent's conversation through a small Rex action, which the computer running Rex has to load.\n\n" +
+            (if (update) {
+                "The computer running Rex has an older compy.lua, which doesn't know the agent in this pane. Chat now reads Claude Code, Codex and Pi.\n\n"
+            } else {
+                "Compy reads an agent's conversation through a small Rex action, which the computer running Rex has to load.\n\n"
+            }) +
                 "1. Tap Copy command.\n" +
                 "2. Paste it into a shell on that computer and press Enter. A shell pane here in Compy works.\n" +
                 "3. Come back to this pane. The chat shows up by itself.",

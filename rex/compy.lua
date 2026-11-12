@@ -1,4 +1,5 @@
 -- Compy for Rex: lets the Compy app show an agent's conversation as a chat.
+-- It knows Claude Code, Codex and Pi.
 --
 -- The app's chat screen copies a command that installs this file. By hand: put
 -- it next to your init.lua and load it from there:
@@ -14,7 +15,7 @@
 -- decides the file, and callers can't name one.
 
 local terminal = "com.superlogical.terminal"
-local VERSION = 2
+local VERSION = 3
 local DEFAULT_BYTES = 256 * 1024
 local MAX_BYTES = 1024 * 1024
 -- A line still longer than this after its blobs are taken out is left out.
@@ -38,14 +39,75 @@ local function base(path)
   return path and (path:match("([^/]+)$")) or nil
 end
 
+local AGENTS = { claude = "claude", codex = "codex", pi = "pi" }
+
 -- Which agent a pane's foreground process is, from its name, argv[0] or script.
 local function agent_of(fg)
   -- Counted rather than ipairs, which stops at the first name that's missing.
   local names = { base(fg.argv0), base(fg.invoked_path), fg.name, base(fg.script) }
   for i = 1, 4 do
-    if names[i] == "claude" then return "claude" end
+    local agent = names[i] and AGENTS[names[i]]
+    if agent then return agent end
+  end
+  -- Pi is a script that node runs, known by the package it is in when not by its name.
+  if type(fg.script) == "string" and fg.script:find("pi-coding-agent", 1, true) then return "pi" end
+  return nil
+end
+
+-- A string as one word of a shell command.
+local function quote(text)
+  return "'" .. text:gsub("'", "'\\''") .. "'"
+end
+
+-- The lines a command prints, or none when it can't be run. `argv` is the command and its
+-- arguments, one to a word. Rex runs commands with rex.exec; before that there was io.popen.
+local function run(argv)
+  local text
+  if rex.exec then
+    local ok, result = pcall(rex.exec, argv)
+    text = ok and type(result) == "table" and result.stdout or nil
+  elseif io.popen then
+    local words = {}
+    for i = 1, #argv do words[i] = quote(argv[i]) end
+    local p = io.popen(table.concat(words, " ") .. " 2>/dev/null")
+    if p then
+      text = p:read("*a")
+      p:close()
+    end
+  end
+  local lines = {}
+  if type(text) ~= "string" then return lines end
+  for line in text:gmatch("[^\n]+") do lines[#lines + 1] = line end
+  return lines
+end
+
+-- A file matching `pattern` that process `pid` holds open, from lsof, or from /proc where
+-- there is no lsof.
+local function open_file(pid, pattern)
+  pid = tonumber(pid)
+  if not pid then return nil end
+  for _, line in ipairs(run{ "lsof", "-p", string.format("%d", pid), "-Fn" }) do
+    local path = line:match("^n(/.*)$")
+    if path and path:match(pattern) then return path end
+  end
+  for _, line in ipairs(run{ "ls", "-l", "/proc/" .. string.format("%d", pid) .. "/fd" }) do
+    local path = line:match(" %-> (/.*)$")
+    if path and path:match(pattern) then return path end
   end
   return nil
+end
+
+-- Finding a transcript can mean asking the system, which is too slow to do for every read.
+-- An answer is kept for a few seconds, which is also how soon a new session is noticed.
+local found, FOUND_SECONDS = {}, 4
+
+local function remembered(key, find)
+  local now = os.time()
+  local hit = found[key]
+  if hit and now - hit.at < FOUND_SECONDS then return hit.path end
+  local path = find()
+  found[key] = { path = path, at = now }
+  return path
 end
 
 -- Claude Code's folder name for a working directory. It replaces everything
@@ -114,6 +176,48 @@ locators.claude = function(fg, home)
   return dir .. "/projects/" .. claude_project(cwd) .. "/" .. session.sessionId .. ".jsonl", session.sessionId
 end
 
+-- Codex: <home>/sessions/<year>/<month>/<day>/rollout-<time>-<id>.jsonl. Nothing names a
+-- process's session, so it is the rollout file the process holds open, or failing that the
+-- newest one that was started in the pane's folder.
+locators.codex = function(fg, home)
+  local dir = os.getenv("CODEX_HOME") or (home .. "/.codex")
+  local path = remembered("codex:" .. tostring(fg.pid), function()
+    local held = open_file(fg.pid, "/rollout%-[^/]*%.jsonl$")
+    if held then return held end
+    local cwd = fg.cwd
+    if type(cwd) ~= "string" or cwd == "" then return nil end
+    -- As it is written in the file: JSON escapes backslashes and quotes.
+    local needle = '"cwd":"' .. cwd:gsub("\\", "\\\\"):gsub('"', '\\"') .. '"'
+    local newest = "ls -t " .. quote(dir) .. "/sessions/*/*/*/rollout-*.jsonl 2>/dev/null | head -n 12"
+    for _, candidate in ipairs(run{ "sh", "-c", newest }) do
+      local f = io.open(candidate, "rb")
+      if f then
+        local head = f:read(16384) or ""
+        f:close()
+        if head:find(needle, 1, true) then return candidate end
+      end
+    end
+    return nil
+  end)
+  return path, path and base(path)
+end
+
+-- Pi: <home>/sessions/--<the folder, with - for each / and :>--/<time>_<id>.jsonl. The
+-- session a pane is in is the newest file of its folder.
+locators.pi = function(fg, home)
+  local dir = (os.getenv("PI_CODING_AGENT_DIR") or (home .. "/.pi/agent")) .. "/sessions"
+  local path = remembered("pi:" .. tostring(fg.pid), function()
+    local held = open_file(fg.pid, "/sessions/%-%-[^/]*%-%-/[^/]*%.jsonl$")
+    if held then return held end
+    local cwd = fg.cwd
+    if type(cwd) ~= "string" or cwd == "" then return nil end
+    local folder = dir .. "/--" .. (cwd:gsub("^[/\\]", ""):gsub("[/\\:]", "-")) .. "--"
+    local newest = run{ "sh", "-c", "ls -t " .. quote(folder) .. " 2>/dev/null | grep '\\.jsonl$' | head -n 1" }[1]
+    return newest and (folder .. "/" .. newest) or nil
+  end)
+  return path, path and base(path)
+end
+
 -- A line with its long base64 blobs replaced by where they are: the line's
 -- offset and the blob's place in it, which compy_image takes.
 local function tidy(line, offset)
@@ -132,8 +236,18 @@ local function tidy(line, offset)
       return '"base64":""'
     end)
   end
+  -- Codex keeps each thought a second time, encrypted, and pictures inside addresses. Neither
+  -- is something the chat can show, and both are long.
+  if #line >= MIN_BLOB and line:find('"encrypted_content":"', 1, true) then
+    line = line:gsub('"encrypted_content":"[%w+/=_%-]*"', '"encrypted_content":""')
+  end
+  if #line >= MIN_BLOB and line:find('"data:image/', 1, true) then
+    line = line:gsub('"data:image/[%w.+%-]+;base64,[%w+/=]*"', '"compy-image"')
+  end
   if #line > MAX_LINE then
-    return '{"type":"compy-omitted","bytes":' .. #line .. '}'
+    -- What kind of record it was, for the app to say something truer than "too large".
+    local kind = line:sub(1, 300):match('"type":"([%w_%-]+)"') or ""
+    return '{"type":"compy-omitted","bytes":' .. #line .. ',"was":"' .. kind .. '"}'
   end
   return line
 end

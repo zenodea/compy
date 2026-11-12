@@ -451,10 +451,8 @@ class ServerConnection(
     /** An interpreter's script says more than its name, so node running claude counts as claude. */
     private fun setProgram(blockId: String, foreground: JsonObject?) {
         val process = foreground?.get("name").str() ?: return
-        // Claude Code's native build runs as a file named after its version, such as 2.1.319.
-        val name = if (VERSION_NAME.matches(process)) foreground?.get("argv0").str()?.substringAfterLast('/') ?: process else process
-        val script = foreground?.get("script").str()?.substringAfterLast('/')
-        _programs.update { it + (blockId to listOfNotNull(name, script).joinToString("/")) }
+        val program = programName(process, foreground?.get("argv0").str(), foreground?.get("invoked_path").str(), foreground?.get("script").str())
+        _programs.update { it + (blockId to program) }
     }
 
     private suspend fun readTitle(sessionId: String, blockId: String) {
@@ -1283,6 +1281,5 @@ class ServerConnection(
         private const val MAX_IMAGE_BASE64 = 32 * 1024 * 1024
         private const val UPLOAD_FINISH_MS = 60_000L
         private const val UPLOAD_API_REVISION = 11
-        val VERSION_NAME = Regex("""\d+(\.\d+)+""")
     }
 }

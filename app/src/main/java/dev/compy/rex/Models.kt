@@ -115,6 +115,22 @@ data class SessionView(
     fun windowOf(blockId: String) = windows.firstOrNull { w -> w.blocks.any { it.id == blockId } }
 }
 
+private val VERSION_NAME = Regex("""\d+(\.\d+)+""")
+
+/**
+ * What a pane runs, as `name` or `name/script`, from what the host says about its foreground
+ * process. An interpreter's script says more than its name, so node running claude counts as claude.
+ */
+fun programName(process: String, argv0: String?, invokedPath: String?, script: String?): String {
+    val called = argv0?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+    // Claude Code's native build runs as a file named after its version, such as 2.1.319.
+    val name = if (VERSION_NAME.matches(process)) called ?: process else process
+    // A program that renames itself, as Pi does under node, is known only by the name it took.
+    val renamed = called?.takeIf { it != name && it != invokedPath?.substringAfterLast('/') }
+    val part = script?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: renamed
+    return listOfNotNull(name, part).joinToString("/")
+}
+
 /** What a program in a terminal last reported with OSC 7501. */
 data class ProgramStatus(
     val state: String,

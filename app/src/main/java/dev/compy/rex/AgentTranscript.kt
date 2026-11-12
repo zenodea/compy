@@ -42,7 +42,8 @@ data class ToolResult(val ok: Boolean, val output: String, val images: List<Chat
 data class ChatImage(val offset: Long, val index: Int, val bytes: Int)
 
 private fun imageOf(block: JsonObject): ChatImage? {
-    val ref = block["source"].obj()?.get("compy_blob").obj() ?: return null
+    // Claude Code keeps an image's data under `source`; Pi keeps it on the block itself.
+    val ref = (block["source"].obj()?.get("compy_blob") ?: block["compy_blob"]).obj() ?: return null
     return ChatImage(ref["offset"].long() ?: return null, ref["index"].int() ?: return null, ref["bytes"].int() ?: 0)
 }
 
@@ -231,8 +232,212 @@ fun joinResults(entries: List<ChatEntry>): List<ChatEntry> {
     }
 }
 
+private const val OMITTED = "A message too large to show was left out"
+
+/** Remembers the last few texts shown, for transcripts that write the same message twice. */
+private class Seen(private val limit: Int = 64) {
+    private val recent = ArrayDeque<String>()
+
+    /** True the first time [text] comes by, false while it is still remembered. */
+    fun first(text: String): Boolean {
+        if (text in recent) return false
+        recent.addLast(text)
+        if (recent.size > limit) recent.removeFirst()
+        return true
+    }
+}
+
+/**
+ * Codex's `~/.codex/sessions/<date>/rollout-<time>-<id>.jsonl`. Each line has a `type` and a
+ * `payload`. What the person and the agent said, and the commands that ran, come as finished
+ * items (`event_msg` with `item_completed`); the model's own messages and tool calls come as
+ * `response_item` records, which older versions wrote alone. Both are read, and a message that
+ * arrives both ways is shown once.
+ */
+class CodexTranscriptParser : TranscriptParser {
+    private val said = Seen()
+    private var lastNotice: String? = null
+
+    override fun parse(line: String, key: String): List<ChatEntry> {
+        val record = runCatching { lenient.parseToJsonElement(line) }.getOrNull().obj() ?: return emptyList()
+        val entries = when (record["type"].str()) {
+            // A compaction is one very long record; the item that goes with it says it happened.
+            "compy-omitted" -> if (record["was"].str() == "compacted") emptyList() else listOf(ChatEntry.Notice(key, OMITTED))
+            "event_msg" -> event(record["payload"].obj() ?: return emptyList(), key)
+            "response_item" -> response(record["payload"].obj() ?: return emptyList(), key)
+            else -> emptyList()
+        }
+        // Compacting is recorded in more than one way, one after the other.
+        return entries.filter { e ->
+            if (e !is ChatEntry.Notice) {
+                lastNotice = null
+                true
+            } else {
+                val repeated = e.text == lastNotice
+                lastNotice = e.text
+                !repeated
+            }
+        }
+    }
+
+    private fun assistant(text: String?, key: String): List<ChatEntry> {
+        val shown = text?.trim().orEmpty()
+        if (shown.isEmpty() || !said.first("a:$shown")) return emptyList()
+        return listOf(ChatEntry.Assistant(key, clipText(shown)))
+    }
+
+    private fun user(text: String?, key: String): List<ChatEntry> {
+        val shown = text?.trim().orEmpty()
+        if (shown.isEmpty()) return emptyList()
+        return listOf(ChatEntry.User(key, clipText(shown)))
+    }
+
+    private fun event(payload: JsonObject, key: String): List<ChatEntry> = when (payload["type"].str()) {
+        "item_completed" -> item(payload["item"].obj() ?: return emptyList(), key)
+        // How versions before items wrote the same things.
+        "user_message" -> user(payload["message"].str(), key)
+        "agent_message" -> assistant(payload["message"].str(), key)
+        "agent_reasoning" -> payload["text"].str()?.trim()?.takeIf { it.isNotEmpty() }?.let { listOf(ChatEntry.Thinking(key, clipText(it))) }.orEmpty()
+        "turn_aborted" -> listOf(ChatEntry.Notice(key, "Interrupted"))
+        else -> emptyList()
+    }
+
+    private fun item(item: JsonObject, key: String): List<ChatEntry> {
+        val id = item["id"].str() ?: key
+        return when (item["type"].str()) {
+            "UserMessage" -> user(contentText(item["content"]), key)
+            "AgentMessage" -> assistant(contentText(item["content"]), key)
+            "Reasoning" -> contentText(item["summary_text"]).trim().takeIf { it.isNotEmpty() }
+                ?.let { listOf(ChatEntry.Thinking(key, clipText(it))) }.orEmpty()
+            "CommandExecution" -> {
+                val words = item["command"].arr().orEmpty().mapNotNull { it.str() }
+                // A command run through a shell is the last word; the words before only start the shell.
+                val command = if (words.size >= 3 && words[1].startsWith("-") && words[1].endsWith("c")) words.last() else words.joinToString(" ")
+                val status = item["exit_code"].int()
+                listOf(
+                    ChatEntry.Tool(
+                        key, id, "Shell", firstLineOf(command), command.takeIf { it.trim() != firstLineOf(command) }?.let { clipText(it, INPUT_LIMIT) },
+                        // A command still running has no exit code yet.
+                        item["aggregated_output"].str()?.let { ToolResult(ok = status == null || status == 0, output = clipOutput(it)) },
+                    ),
+                )
+            }
+            "FileChange" -> {
+                val files = item["changes"].obj()?.keys.orEmpty().map { it.substringAfterLast('/') }
+                val failed = item["status"].str() == "failed"
+                listOf(
+                    ChatEntry.Tool(
+                        key, id, "Edit", files.joinToString(", "), null,
+                        ToolResult(ok = !failed, output = clipOutput(listOfNotNull(item["stdout"].str(), item["stderr"].str()).filter { it.isNotBlank() }.joinToString("\n"))),
+                    ),
+                )
+            }
+            "ImageView" -> listOf(ChatEntry.Tool(key, id, "View image", item["path"].str().orEmpty().substringAfterLast('/'), null, ToolResult(true, "")))
+            "Extension" -> if (item["kind"].str() == "web.search") {
+                listOf(ChatEntry.Tool(key, id, "Web search", firstLineOf(item["query"].str().orEmpty()), null, ToolResult(true, "")))
+            } else {
+                emptyList()
+            }
+            "ContextCompaction" -> listOf(ChatEntry.Notice(key, "Conversation compacted"))
+            else -> emptyList()
+        }
+    }
+
+    private fun response(payload: JsonObject, key: String): List<ChatEntry> = when (payload["type"].str()) {
+        // Only the agent's own words. What goes in as the user's turn is mostly context added for the model.
+        "message" -> if (payload["role"].str() == "assistant") assistant(contentText(payload["content"]), key) else emptyList()
+        "reasoning" -> contentText(payload["summary"]).trim().takeIf { it.isNotEmpty() }
+            ?.let { listOf(ChatEntry.Thinking(key, clipText(it))) }.orEmpty()
+        "function_call" -> {
+            val arguments = payload["arguments"].str()?.let { runCatching { lenient.parseToJsonElement(it) }.getOrNull() } ?: payload["arguments"]
+            listOf(ChatEntry.Tool(key, payload["call_id"].str().orEmpty(), payload["name"].str() ?: "tool", toolSummary(arguments), toolInput(arguments)))
+        }
+        // "exec" is the wrapper every command goes through; the commands themselves come as items.
+        "custom_tool_call" -> if (payload["name"].str() == "exec") {
+            emptyList()
+        } else {
+            listOf(ChatEntry.Tool(key, payload["call_id"].str().orEmpty(), payload["name"].str() ?: "tool", toolSummary(payload["input"]), toolInput(payload["input"])))
+        }
+        "function_call_output", "custom_tool_call_output" -> listOf(ResultEntry(key, payload["call_id"].str().orEmpty(), output(payload["output"])))
+        else -> emptyList()
+    }
+
+    /** A call's output, which is text, a list of text blocks, or JSON holding the text and an exit code. */
+    private fun output(value: JsonElement?): ToolResult {
+        val text = value.str() ?: return ToolResult(true, clipOutput(contentText(value)))
+        val wrapped = text.takeIf { it.startsWith("{") }?.let { runCatching { lenient.parseToJsonElement(it) }.getOrNull().obj() }
+        val inner = wrapped?.get("output").str() ?: return ToolResult(true, clipOutput(text))
+        val status = wrapped?.get("metadata").obj()?.get("exit_code").int()
+        return ToolResult(ok = status == null || status == 0, output = clipOutput(inner))
+    }
+}
+
+private fun firstLineOf(text: String) = firstLine(text)
+
+/**
+ * Pi's `~/.pi/agent/sessions/--<folder>--/<time>_<id>.jsonl`. Messages are lines of type
+ * `message` with a role: the person, the assistant (text, thinking and tool calls as content
+ * blocks), or a tool's result. Other lines record the session, model changes and the like.
+ */
+class PiTranscriptParser : TranscriptParser {
+    override fun parse(line: String, key: String): List<ChatEntry> {
+        val record = runCatching { lenient.parseToJsonElement(line) }.getOrNull().obj() ?: return emptyList()
+        return when (record["type"].str()) {
+            "compy-omitted" -> listOf(ChatEntry.Notice(key, OMITTED))
+            "compaction" -> listOf(ChatEntry.Notice(key, "Conversation compacted"))
+            // What an extension put into the conversation for the person to see.
+            "custom_message" -> if ((record["display"] as? JsonPrimitive)?.booleanOrNull == true) {
+                contentText(record["content"]).trim().takeIf { it.isNotEmpty() }?.let { listOf(ChatEntry.Notice(key, firstLine(it))) }.orEmpty()
+            } else {
+                emptyList()
+            }
+            "message" -> message(record["message"].obj() ?: return emptyList(), key)
+            else -> emptyList()
+        }
+    }
+
+    private fun message(message: JsonObject, key: String): List<ChatEntry> = when (message["role"].str()) {
+        "user" -> {
+            val text = contentText(message["content"].str()?.let(::JsonPrimitive) ?: textBlocks(message["content"])).trim()
+            val images = contentImages(message["content"])
+            if (text.isEmpty() && images.isEmpty()) emptyList() else listOf(ChatEntry.User(key, clipText(text), images))
+        }
+        "assistant" -> message["content"].arr().orEmpty().mapIndexedNotNull { i, block ->
+            val b = block.obj() ?: return@mapIndexedNotNull null
+            val k = "$key:$i"
+            when (b["type"].str()) {
+                "text" -> b["text"].str()?.trim()?.takeIf { it.isNotEmpty() }?.let { ChatEntry.Assistant(k, clipText(it)) }
+                "thinking" -> b["thinking"].str()?.trim()?.takeIf { it.isNotEmpty() }?.let { ChatEntry.Thinking(k, clipText(it)) }
+                "toolCall" -> ChatEntry.Tool(k, b["id"].str().orEmpty(), b["name"].str() ?: "tool", toolSummary(b["arguments"]), toolInput(b["arguments"]))
+                else -> null
+            }
+        }
+        "toolResult" -> listOf(
+            ResultEntry(
+                key,
+                message["toolCallId"].str().orEmpty(),
+                ToolResult(
+                    ok = (message["isError"] as? JsonPrimitive)?.booleanOrNull != true,
+                    output = clipOutput(contentText(textBlocks(message["content"]))),
+                    images = contentImages(message["content"]),
+                ),
+            ),
+        )
+        else -> emptyList()
+    }
+
+    /** Only the text blocks, since an image block has no text of its own. */
+    private fun textBlocks(content: JsonElement?): JsonElement =
+        JsonArray(content.arr().orEmpty().filter { it.obj()?.get("type").str() == "text" })
+}
+
+/** The agents whose conversations Compy can show as a chat. */
+val CHAT_AGENT_NAMES = setOf("claude", "codex", "pi")
+
 /** The parser for an agent the transcript action reported, or null for one Compy can't read yet. */
 fun transcriptParser(agent: String): TranscriptParser? = when (agent) {
     "claude" -> ClaudeTranscriptParser()
+    "codex" -> CodexTranscriptParser()
+    "pi" -> PiTranscriptParser()
     else -> null
 }
