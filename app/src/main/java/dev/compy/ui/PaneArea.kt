@@ -1,5 +1,7 @@
 package dev.compy.ui
 
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.ime
 import androidx.compose.runtime.DisposableEffect
 import dev.compy.AppState
 import dev.compy.rex.ServerConnection
@@ -120,6 +122,25 @@ private val PaneLook.handleInset: Dp get() = if (tight) 3.dp else 6.dp
 /** Extra room above a pane's text, so its first line starts just below the drag handle. */
 private val PaneLook.handleSpace: Dp get() = if (tight) handleInset + 11.dp else 9.dp
 
+/**
+ * What the keyboard takes from the pane area. Terminals are sized by the height the area has
+ * with the keyboard away, so that a keyboard coming up only covers rows and never resizes a
+ * terminal. It is written while the area lays itself out and read by the panes inside it.
+ */
+internal class KeyboardRoom {
+    /** The area's size with the keyboard away, as last seen. */
+    var rest = 0
+    var restWidth = 0
+    /** How much taller the area is with the keyboard away than it is now. */
+    var hidden = 0
+}
+
+/** One pane's height with the keyboard away, and how much of that is hidden now. */
+class PaneExtent {
+    var full = 0
+    var hidden = 0
+}
+
 private data class PlacedSplit(
     val split: LayoutNode.Split,
     val rect: FractionRect,
@@ -161,6 +182,7 @@ private fun firstLeaf(node: LayoutNode): String = when (node) {
  * Lays out a window's panes exactly as Rex describes them, with draggable dividers. Panes glide to
  * new positions, and a pane's real size only goes to the server once it has settled.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun PaneArea(
     controller: WorkspaceController,
@@ -175,11 +197,35 @@ fun PaneArea(
     lifted: String? = null,
 ) {
     val tiled = window.tiledLayer
+    val room = remember(window.id) { KeyboardRoom() }
+    val ime = WindowInsets.ime
+    val bars = WindowInsets.navigationBars
+    val imeVisible = rememberUpdated(WindowInsets.isImeVisible)
     val overrides = remember(window.id) { mutableStateMapOf<String, Float>() }
     // Panes already here when the window opens shouldn't animate in.
     val known = remember(window.id) { mutableSetOf<String>() }
     val knownLayers = remember(window.id) { mutableSetOf<String>() }
-    Box(modifier) {
+    Box(
+        modifier.layout { measurable, constraints ->
+            // What the workspace adds under its content for the keyboard, over what it leaves
+            // for the navigation bar anyway. Read here, so the keyboard sliding only lays out.
+            val bar = bars.getBottom(this)
+            val taken = ime.getBottom(this) + (if (imeVisible.value) 0 else bar) - bar
+            val height = constraints.maxHeight
+            if (taken == 0) {
+                room.rest = height
+                room.restWidth = constraints.maxWidth
+            }
+            room.hidden = when {
+                taken == 0 -> 0
+                // The height it had, which is right whatever else moved when the keyboard came.
+                room.rest > 0 && room.restWidth == constraints.maxWidth -> room.rest - height
+                else -> taken
+            }
+            val placeable = measurable.measure(constraints)
+            layout(placeable.width, placeable.height) { placeable.place(0, 0) }
+        },
+    ) {
         val zoomed = window.zoomedBlockId
         val panes = mutableListOf<Pair<String, FractionRect>>()
         val splits = mutableListOf<PlacedSplit>()
@@ -200,6 +246,7 @@ fun PaneArea(
                 val isNew = !firstLayout && blockId !in known
                 SideEffect { known += blockId }
                 val visible = zoomed == null || zoomed == blockId
+                val extent = remember { PaneExtent() }
                 AnimatedPane(
                     target = if (zoomed == blockId) whole else rect,
                     visible = visible,
@@ -208,10 +255,13 @@ fun PaneArea(
                     animateIn = isNew,
                     inset = inset,
                     dimmed = blockId == lifted,
+                    hidden = { room.hidden },
+                    extent = extent,
                 ) {
                     TerminalPane(
                         controller = controller,
                         blockId = blockId,
+                        extent = extent,
                         focused = blockId == controller.focusedBlockId,
                         showFocusRing = multiple,
                         interactive = !arranging && enabled && visible,
@@ -240,6 +290,7 @@ fun PaneArea(
                     // A zoomed pane fills the window, and arranging only moves the tiled panes.
                     shown = !layer.minimized && zoomed == null && !arranging,
                     enabled = enabled && !arranging,
+                    room = room,
                     onPaneTapped = onPaneTapped,
                     onMessage = onMessage,
                 )
@@ -298,7 +349,14 @@ fun PaneArea(
  * Places a pane as a fraction of its parent, with its edges on whole pixels. It reads its values
  * only while laying out, so moving panes never recompose their contents.
  */
-private fun Modifier.fractionalPane(rect: () -> FractionRect, inset: () -> Dp): Modifier = layout { measurable, constraints ->
+private fun Modifier.fractionalPane(
+    rect: () -> FractionRect,
+    inset: () -> Dp,
+    /** How much taller the parent is with the keyboard away. */
+    hidden: () -> Int = { 0 },
+    /** Told how tall this pane is with the keyboard away, worked out the same way as its height now. */
+    extent: PaneExtent? = null,
+): Modifier = layout { measurable, constraints ->
     val r = rect()
     val i = inset().roundToPx()
     val parentW = constraints.maxWidth
@@ -307,7 +365,13 @@ private fun Modifier.fractionalPane(rect: () -> FractionRect, inset: () -> Dp): 
     val top = (parentH * r.y).roundToInt() + i
     val right = (parentW * (r.x + r.w)).roundToInt() - i
     val bottom = (parentH * (r.y + r.h)).roundToInt() - i
-    val placeable = measurable.measure(Constraints.fixed(maxOf(1, right - left), maxOf(1, bottom - top)))
+    val height = maxOf(1, bottom - top)
+    if (extent != null) {
+        val fullParent = parentH + hidden()
+        extent.full = maxOf(1, ((fullParent * (r.y + r.h)).roundToInt() - i) - ((fullParent * r.y).roundToInt() + i))
+        extent.hidden = extent.full - height
+    }
+    val placeable = measurable.measure(Constraints.fixed(maxOf(1, right - left), height))
     layout(parentW, parentH) { placeable.place(left, top) }
 }
 
@@ -329,10 +393,12 @@ private fun FloatingLayer(
     isNew: Boolean,
     shown: Boolean,
     enabled: Boolean,
+    room: KeyboardRoom,
     onPaneTapped: (String) -> Unit,
     onMessage: (String) -> Unit,
 ) {
     val connection = controller.connection
+    val layerExtent = remember(layer.id) { PaneExtent() }
     val sessionId = controller.sessionId
     val scheme = MaterialTheme.colorScheme
     val titles by connection.titles.collectAsStateWithLifecycle()
@@ -374,7 +440,7 @@ private fun FloatingLayer(
                 val placeable = measurable.measure(constraints)
                 layout(placeable.width, placeable.height) { placeable.place(0, 0) }
             }
-            .fractionalPane({ local ?: bounds.value }, { 0.dp }),
+            .fractionalPane({ local ?: bounds.value }, { 0.dp }, hidden = { room.hidden }, extent = layerExtent),
     ) {
         AnimatedVisibility(
             visible,
@@ -448,10 +514,13 @@ private fun FloatingLayer(
                     layer.layout?.let { place(it, FractionRect(0f, 0f, 1f, 1f), emptyMap(), inner, mutableListOf()) }
                     inner.forEach { (blockId, rect) ->
                         key(blockId) {
-                            Box(Modifier.fractionalPane({ rect }, { 0.dp })) {
+                            val extent = remember { PaneExtent() }
+                            // The bar above keeps its height, so what the card loses the panes lose.
+                            Box(Modifier.fractionalPane({ rect }, { 0.dp }, hidden = { layerExtent.hidden }, extent = extent)) {
                                 TerminalPane(
                                     controller = controller,
                                     blockId = blockId,
+                                    extent = extent,
                                     focused = blockId == controller.focusedBlockId,
                                     showFocusRing = inner.size > 1,
                                     interactive = enabled,
@@ -688,6 +757,8 @@ private fun AnimatedPane(
     animateIn: Boolean,
     inset: State<Dp>,
     dimmed: Boolean = false,
+    hidden: () -> Int = { 0 },
+    extent: PaneExtent? = null,
     content: @Composable () -> Unit,
 ) {
     val spec: AnimationSpec<Float> = if (snap) snap() else motion()
@@ -703,7 +774,7 @@ private fun AnimatedPane(
     Box(
         Modifier
             .zIndex(if (onTop) 1f else 0f)
-            .fractionalPane({ FractionRect(x.value, y.value, w.value, h.value) }, { inset.value })
+            .fractionalPane({ FractionRect(x.value, y.value, w.value, h.value) }, { inset.value }, hidden, extent)
             .graphicsLayer {
                 alpha = fade.value * enter.value * dim.value
                 val scale = 0.94f + 0.06f * enter.value
@@ -1068,7 +1139,6 @@ private fun BoxScope.ArrangeOverlay(
 }
 
 /** One terminal pane: the rounded surface, the terminal view and any connection notice. */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun TerminalPane(
     controller: WorkspaceController,
@@ -1078,6 +1148,8 @@ fun TerminalPane(
     interactive: Boolean,
     onTapped: () -> Unit,
     handleSpace: Boolean = false,
+    /** The pane's height with the keyboard away, which its terminal is sized by. */
+    extent: PaneExtent? = null,
 ) {
     val app = controller.app
     val density = LocalDensity.current
@@ -1098,10 +1170,6 @@ fun TerminalPane(
     // Remembered with the app, not with this screen: a pane comes back as it was last seen.
     val chat = agent != null && app.chatShown(blockId, settings)
     val keyboard = LocalSoftwareKeyboardController.current
-    // A pane showing its chat keeps its terminal at the pane's full size on the server. Typing
-    // in the chat makes the pane smaller on the phone, and that is the one change of size the
-    // server isn't told about.
-    val chatKeyboardUp = chat && WindowInsets.isImeVisible
     val terminalLook = remember(settings) { settings.terminalLook() }
     // A pane that is still connecting shows the color its terminal will have, not black.
     val hostColors by controller.connection.hostTheme.collectAsStateWithLifecycle()
@@ -1130,6 +1198,8 @@ fun TerminalPane(
                     view.fontSizeSp = fontSize
                     view.emptyColor = emptyColor
                     view.host = controller.host(blockId) { latestTap.value() }
+                    // A keyboard only covers the pane. The terminal keeps the size it has without one.
+                    view.fullHeight = { extent?.full ?: 0 }
                     view.onScrolledUp = { scrolledUp = it }
                     view.bind(session)
                     controller.register(blockId, view)
@@ -1137,7 +1207,8 @@ fun TerminalPane(
             },
             update = { view ->
                 view.interactive = interactive && !chat
-                view.sizing = interactive && !chatKeyboardUp
+                // Under a chat the terminal can't be typed into, and still has the pane's size.
+                view.sizing = interactive
                 view.topSpace = if (handleSpace) with(density) { look.handleSpace.toPx() } else 0f
                 view.keepSize = settings.sizeModes[controller.sessionId] == SizeMode.Keep
                 view.paneFocused = focused && interactive && !chat

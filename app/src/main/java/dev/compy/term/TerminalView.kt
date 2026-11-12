@@ -85,10 +85,24 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             if (value && !was) reportGrid()
         }
     /**
+     * The height this view has with the keyboard away, or 0 to go by its own. The keyboard makes
+     * a pane shorter on the phone, and that is not a change of size for the terminal: it keeps
+     * the rows it has with the keyboard away, and the view shows as many of them as fit, moved
+     * up so the cursor stays in sight. The pane works the height out as it lays itself out.
+     */
+    var fullHeight: () -> Int = { 0 }
+    private val sizeHeight: Int get() = fullHeight().let { if (it > 0) it else height }
+
+    // How far the grid is moved up while it is taller than the view, and how far it could be.
+    private var lift = 0f
+    private var liftRoom = 0f
+    /** Where the person dragged it to, until they type again. Null follows the cursor. */
+    private var userLift: Float? = null
+
+    /**
      * Whether the terminal follows this view's size. Null leaves it to [interactive], which is
      * right for a pane showing its terminal. A pane showing its chat sets it itself: the terminal
-     * under the chat can't be typed into, but it still has the pane's size, and it must not take
-     * the smaller size the pane has while the chat's keyboard is up.
+     * under the chat can't be typed into, but it still has the pane's size.
      */
     var sizing: Boolean? = null
         set(value) {
@@ -342,7 +356,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     private fun reportGrid() {
         if (width <= 0 || height <= 0 || !reportsSize) return
         val avail = width - padding * 2
-        val availH = height - padding - padTop
+        val availH = sizeHeight - padding - padTop
         val cols = max(2, floor(avail / cellW).toInt())
         val rows = max(1, floor(availH / cellH).toInt())
         if (cols != wantCols || rows != wantRows) {
@@ -370,27 +384,45 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         if (awaitingFit(cols, rows)) return 1f
         val w = cols * cellW + padding * 2
         val h = rows * cellH + padding + padTop
-        val fit = min(width / w, height / h)
+        // By the height with the keyboard away: a keyboard covers rows, it doesn't shrink them.
+        val fit = min(width / w, sizeHeight / h)
         return min(1f, fit) * zoom
     }
 
     /**
-     * How far up the grid is moved while it is taller than the view, so the cursor's row stays in
-     * sight above the keyboard; or how far down while it is shorter, when lines from history are
-     * about to fill the room above it. Either way the text is already where the fitted terminal
-     * will draw it, so nothing jumps when the server's answer arrives.
+     * How far up the grid is moved while it is taller than the view, which is what a keyboard
+     * does to it: the last row with anything on it sits at the bottom, the cursor stays in
+     * sight, and a drag moves it to show the rows above. Or how far down it is moved while it is
+     * shorter and waiting to be fitted, when lines from history are about to fill the room above
+     * it, so nothing jumps when the server's answer arrives.
      */
-    private fun anchorShift(cols: Int, rows: Int, s: Float): Float {
-        if (!awaitingFit(cols, rows)) return 0f
+    private fun gridShift(cols: Int, rows: Int, s: Float, defaultFg: Int, defaultBg: Int): Float {
         val room = height - padding - padTop
         val over = rows * cellH * s - room
         val cursorY = meta[GhosttyTerminal.META_CURSOR_Y]
-        val cursorShown = meta[GhosttyTerminal.META_CURSOR_VISIBLE] != 0
-        if (over > 0f) {
-            // A program that hides the cursor draws its own input at the bottom.
-            if (!cursorShown) return over
-            return ((cursorY + 1) * cellH * s - room).coerceIn(0f, over)
+        val cursorShown = meta[GhosttyTerminal.META_CURSOR_VISIBLE] != 0 && cursorY in 0 until rows
+        if (over > 0.5f) {
+            liftRoom = over
+            val dragged = userLift
+            if (dragged != null) {
+                lift = dragged.coerceIn(0f, max(0f, over - panY))
+                return lift
+            }
+            // The last row a program drew on, which for an agent is the line under its input.
+            var last = rows - 1
+            while (last > 0 && rowHash(last, cols, defaultFg, defaultBg) == 0L) last--
+            if (cursorShown) last = max(last, cursorY)
+            var up = ((last + 1) * cellH * s - room).coerceIn(0f, over)
+            // The cursor wins when it and that last row can't both be seen.
+            if (cursorShown && cursorY * cellH * s < up) up = cursorY * cellH * s
+            // A zoomed view pans as well, and the two together stop at the grid's last row.
+            lift = up.coerceAtMost(max(0f, over - panY))
+            return lift
         }
+        lift = 0f
+        liftRoom = 0f
+        userLift = null
+        if (!awaitingFit(cols, rows)) return 0f
         val history = meta[GhosttyTerminal.META_SCROLL_TOTAL] > meta[GhosttyTerminal.META_SCROLL_LEN]
         val atBottom = !cursorShown || cursorY >= rows - 1
         return if (history && atBottom && meta[GhosttyTerminal.META_ALT] == 0) over else 0f
@@ -502,7 +534,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         val s = scale(cols, rows)
         drawScale = s
         originX = padding - panX
-        val shift = anchorShift(cols, rows, s)
+        val shift = gridShift(cols, rows, s, defaultFg, defaultBg)
         originY = padTop - panY - shift
         // A grid moved down leaves room above it, which the lines just above the screen fill:
         // the same lines the fitted terminal is about to show there.
@@ -1218,6 +1250,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
 
     /** Call when something was typed: shows the newest line and the cursor, whatever its blink was doing. */
     private fun typing() {
+        // Back to following the cursor, wherever the grid was dragged to.
+        userLift = null
         toBottom()
         blinkFrom = SystemClock.uptimeMillis()
     }
@@ -1283,6 +1317,17 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
      * which ends a fling at either end of the history.
      */
     private fun scrollByPixels(dy: Float, x: Float, y: Float): Boolean {
+        // With rows hidden behind the keyboard, a drag first moves the grid to show them, in a
+        // full-screen program too. Past either end it scrolls as it always does.
+        if (liftRoom > 0f) {
+            val next = (lift + dy).coerceIn(0f, liftRoom)
+            if (abs(next - lift) > 0.01f) {
+                userLift = next
+                lift = next
+                invalidate()
+                return true
+            }
+        }
         if (appOwnsScroll) {
             scrollRemainder += dy / (cellH * drawScale)
             val lines = scrollRemainder.toInt()
