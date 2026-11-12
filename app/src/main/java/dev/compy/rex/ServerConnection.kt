@@ -120,6 +120,9 @@ class ServerConnection(
     /** Each block's current folder name. */
     private val _folders = MutableStateFlow<Map<String, String>>(emptyMap())
     val folders: StateFlow<Map<String, String>> = _folders.asStateFlow()
+    private val _folderPaths = MutableStateFlow<Map<String, String>>(emptyMap())
+    /** Where each block is, as a path shortened under a home folder: `~/compy`. */
+    val folderPaths: StateFlow<Map<String, String>> = _folderPaths.asStateFlow()
 
     /** Progress programs report separately from their status, in percent, or -1 when unknown. */
     private val _progress = MutableStateFlow<Map<String, Int>>(emptyMap())
@@ -419,11 +422,28 @@ class ServerConnection(
 
     private val statusRead = ConcurrentHashMap.newKeySet<String>()
 
-    private suspend fun readStatus(sessionId: String, blockId: String) {
+    /** Counts the status reads asked of each block, so an answer that arrives late is dropped. */
+    private val statusAsks = ConcurrentHashMap<String, Int>()
+
+    /**
+     * Reads every status record a pane holds and takes the most urgent as its status, or none
+     * when it has no record left. With [announce], a status that is news marks the pane and
+     * raises an alert, which is what a change that arrived as an event does.
+     */
+    private suspend fun readStatus(sessionId: String, blockId: String, announce: Boolean = false) {
+        val ask = statusAsks.merge(blockId, 1, Int::plus)
         try {
             val result = control?.call("com.superlogical.terminal.program_status", ids(sessionId, blockId)).obj()
+            if (statusAsks[blockId] != ask) return
             val records = result?.get("records").arr().orEmpty().mapNotNull { parseStatusRecord(it) }
-            setStatus(blockId, mostUrgent(records))
+            val previous = _statuses.value[blockId]
+            val status = mostUrgent(records)
+            setStatus(blockId, status)
+            if (!announce || status == null || previous?.state == status.state) return
+            if (status.isDone || status.isBlocked || status.isError) markAttention(blockId)
+            if (status.isBlocked) {
+                _alerts.tryEmit(Alert(config.id, sessionId, blockId, "${status.app ?: "A program"} ${status.blockedReason}"))
+            }
         } catch (_: Exception) {
             statusRead -= blockId
         }
@@ -439,6 +459,7 @@ class ServerConnection(
     private fun setFolder(blockId: String, pwd: String?) {
         val name = folderName(pwd) ?: return
         _folders.update { it + (blockId to name) }
+        shortFolder(pwd)?.let { path -> _folderPaths.update { it + (blockId to path) } }
     }
 
     private suspend fun readProcess(sessionId: String, blockId: String) {
@@ -464,7 +485,13 @@ class ServerConnection(
     }
 
     private fun setStatus(blockId: String, status: ProgramStatus?) {
-        _statuses.update { if (status == null) it - blockId else it + (blockId to status) }
+        _statuses.update { all ->
+            if (status == null) return@update all - blockId
+            // "Blocked for 4 min" counts from when the state changed, not from each new message.
+            val old = all[blockId]
+            val since = if (old != null && old.state == status.state && old.since != 0L) old.since else android.os.SystemClock.elapsedRealtime()
+            all + (blockId to status.copy(since = since))
+        }
     }
 
     private fun handleEvent(type: String, payload: JsonObject?) {
@@ -554,6 +581,7 @@ class ServerConnection(
                 _titles.update { it - id }
                 _programs.update { it - id }
                 _folders.update { it - id }
+                _folderPaths.update { it - id }
                 _progress.update { it - id }
                 statusRead -= id
                 owned.remove(id)
@@ -572,16 +600,11 @@ class ServerConnection(
         val block = payload["block_id"].str() ?: return
         val fields = payload["payload"].obj()
         when (payload["name"].str()) {
-            "program_status_changed" -> {
-                val status = parseStatusRecord(fields?.get("record")) ?: return
-                val previous = _statuses.value[block]
-                setStatus(block, status)
-                if (status.isDone || status.isBlocked || status.isError) markAttention(block)
-                if (status.isBlocked && previous?.isBlocked != true) {
-                    _alerts.tryEmit(Alert(config.id, sessionId, block, "${status.app ?: "A program"} ${status.blockedReason}"))
-                }
-            }
-            "program_status_removed" -> setStatus(block, null)
+            // A pane holds several records, an agent's and its helpers', and an event tells of
+            // one. Which counts now is the server's to say, so the whole list is read again.
+            // Going by the event alone showed a working agent as finished when a helper
+            // finished, and as idle when one of its records was cleared.
+            "program_status_changed", "program_status_removed" -> scope.launch { readStatus(sessionId, block, announce = true) }
             "process_changed" -> setProgram(block, fields?.get("foreground").obj())
             "bell" -> {
                 markAttention(block)

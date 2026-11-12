@@ -141,6 +141,10 @@ data class ProgramStatus(
     val progress: Int? = null,
     /** When the report arrived, by the server's clock, as an RFC 3339 timestamp. */
     val updatedAt: String? = null,
+    /** The program's own short name for what it is doing, such as a task's name. */
+    val task: String? = null,
+    /** When this state began, on the phone's clock since it started, or 0 before that is known. */
+    val since: Long = 0,
 ) {
     val isBlocked get() = state == "blocked"
     val isWorking get() = state == "working"
@@ -263,6 +267,7 @@ internal fun parseStatusRecord(e: JsonElement?): ProgramStatus? {
         message = o["msg"].str(),
         progress = o["progress"].int(),
         updatedAt = o["updated_at"].str(),
+        task = o["title"].str(),
     )
 }
 
@@ -277,6 +282,23 @@ internal fun mostUrgent(records: List<ProgramStatus>): ProgramStatus? =
             else -> 0
         }
     }
+
+/** A reported directory as a path, shortened under a home folder: `~/compy`. */
+fun shortFolder(pwd: String?): String? {
+    if (pwd.isNullOrBlank()) return null
+    var path: String = pwd
+    if (path.startsWith("file://")) {
+        path = path.removePrefix("file://")
+        path = if ('/' in path) path.substring(path.indexOf('/')) else "/"
+        path = runCatching { java.net.URLDecoder.decode(path.replace("+", "%2B"), "UTF-8") }.getOrDefault(path)
+    }
+    for (prefix in listOf("/Users/", "/home/")) {
+        if (!path.startsWith(prefix)) continue
+        val rest = path.removePrefix(prefix)
+        return if ('/' in rest) "~" + rest.substring(rest.indexOf('/')) else "~"
+    }
+    return if (path == "/root") "~" else path
+}
 
 /** The last part of a reported directory, from a file:// URL or a plain path. */
 fun folderName(pwd: String?): String? {
