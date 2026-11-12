@@ -45,6 +45,7 @@ import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.ViewSidebar
+import androidx.compose.material.icons.rounded.ViewKanban
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -116,6 +117,7 @@ fun Sidebar(
     app: AppState,
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit,
+    onOpenBoard: () -> Unit,
     onAddServer: () -> Unit,
     onOpened: () -> Unit,
     onMessage: (String) -> Unit,
@@ -159,7 +161,7 @@ fun Sidebar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             BoxWithConstraints(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
-                val pillWidth by animateDpAsState(if (searching) maxWidth else 120.dp, motion(), label = "search")
+                val pillWidth by animateDpAsState(if (searching) maxWidth else 160.dp, motion(), label = "search")
                 Row(verticalAlignment = Alignment.CenterVertically) {
                 AnimatedVisibility(
                     !searching,
@@ -180,6 +182,7 @@ fun Sidebar(
                         query = ""
                     },
                     onOpenSettings = onOpenSettings,
+                    onOpenBoard = onOpenBoard,
                     modifier = Modifier.width(pillWidth),
                 )
                 }
@@ -264,6 +267,7 @@ private fun ToolPill(
     onStartSearch: () -> Unit,
     onStopSearch: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenBoard: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -294,6 +298,7 @@ private fun ToolPill(
             }
             RoundButton(Icons.Rounded.Close, "Close search", size = 36.dp, filled = false, tint = scheme.onSurfaceVariant, onClick = onStopSearch)
         } else {
+            RoundButton(Icons.Rounded.ViewKanban, "Agent board", filled = false, tint = scheme.onSurfaceVariant, onClick = onOpenBoard)
             RoundButton(Icons.Rounded.Search, "Search", filled = false, tint = scheme.onSurfaceVariant, onClick = onStartSearch)
         }
         if (!searching) Spacer(Modifier.weight(1f))

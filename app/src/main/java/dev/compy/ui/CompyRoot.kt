@@ -69,7 +69,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.compy.AppState
 import kotlinx.coroutines.launch
 
-private enum class Screen { Main, Settings, AddServer }
+private enum class Screen { Main, Board, Settings, AddServer }
 
 /** Top-level navigation: the lock, the workspace, settings and adding a server. */
 @Composable
@@ -160,6 +160,14 @@ fun CompyRoot(app: AppState, activity: FragmentActivity) {
                     onDone = { screen = Screen.Main },
                 )
                 Screen.Settings -> SettingsScreen(app, onBack = { screen = Screen.Main })
+                Screen.Board -> AgentBoard(
+                    app,
+                    onBack = { screen = Screen.Main },
+                    onOpened = {
+                        showList = false
+                        screen = Screen.Main
+                    },
+                )
                 Screen.Main -> MainLayout(
                     app,
                     showList = showList,
@@ -167,6 +175,7 @@ fun CompyRoot(app: AppState, activity: FragmentActivity) {
                     sidebarOpen = sidebarOpen,
                     onSidebarOpen = { sidebarOpen = it },
                     onOpenSettings = { screen = Screen.Settings },
+                    onOpenBoard = { screen = Screen.Board },
                     onAddServer = { screen = Screen.AddServer },
                     onMessage = showMessage,
                 )
@@ -185,6 +194,7 @@ private fun MainLayout(
     sidebarOpen: Boolean,
     onSidebarOpen: (Boolean) -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenBoard: () -> Unit,
     onAddServer: () -> Unit,
     onMessage: (String) -> Unit,
 ) {
@@ -258,6 +268,7 @@ private fun MainLayout(
                     Sidebar(
                         app, Modifier.fillMaxSize(),
                         onOpenSettings = onOpenSettings,
+                        onOpenBoard = onOpenBoard,
                         onAddServer = onAddServer,
                         onOpened = { onShowList(false) },
                         onMessage = onMessage,
@@ -300,6 +311,7 @@ private fun MainLayout(
                         Sidebar(
                             app, Modifier.fillMaxWidth(),
                             onOpenSettings = onOpenSettings,
+                            onOpenBoard = onOpenBoard,
                             onAddServer = onAddServer,
                             onOpened = { onShowList(false) },
                             onMessage = onMessage,
