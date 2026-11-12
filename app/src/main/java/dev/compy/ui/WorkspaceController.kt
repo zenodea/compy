@@ -179,7 +179,7 @@ class WorkspaceController(
      * Keeps a pane on the phone to read offline: an agent's conversation when it can be read,
      * which opens as a chat, and otherwise the pane's screen and history, which opens as a terminal.
      */
-    fun savePane(blockId: String) {
+    fun savePane(blockId: String, onSaved: () -> Unit = {}) {
         val status = connection.statuses.value[blockId]
         val process = connection.programs.value[blockId]
         val title = BoardRules.title(status, process, connection.titles.value[blockId])
@@ -215,11 +215,12 @@ class WorkspaceController(
                 saved = withContext(Dispatchers.IO) { app.saved.save(title, where, dev.compy.data.SavedPane.TERMINAL, snapshot) }
                 tooLarge = saved == null
             }
+            if (saved != null) onSaved()
             showMessage(
                 when {
                     saved == null -> "This pane is too large to keep on the phone"
-                    saved.kind == dev.compy.data.SavedPane.CHAT -> "Saved the conversation. It is under Saved panes in the session list."
-                    else -> "Saved the terminal. It is under Saved panes in the session list."
+                    saved.kind == dev.compy.data.SavedPane.CHAT -> "Saved the conversation. Hold the save button to open your saved panes."
+                    else -> "Saved the terminal. Hold the save button to open your saved panes."
                 },
             )
         }

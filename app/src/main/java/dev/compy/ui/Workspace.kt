@@ -1,5 +1,8 @@
 package dev.compy.ui
 
+import kotlinx.coroutines.delay
+import androidx.compose.material.icons.rounded.BookmarkAdded
+import androidx.compose.material.icons.rounded.BookmarkAdd
 import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Mic
@@ -148,6 +151,8 @@ fun Workspace(
     /** True while the surrounding layout animates, when terminals shouldn't be resized yet. */
     layoutMoving: Boolean = false,
     onShowSidebar: () -> Unit,
+    /** Opens the panes kept on the phone to read offline. */
+    onOpenSaved: () -> Unit = {},
     onMessage: (String) -> Unit,
 ) {
     val context = LocalContext.current
@@ -399,7 +404,7 @@ fun Workspace(
         ) {
             if (compact) {
                 Box(Modifier.graphicsLayer { alpha = 1f - overviewProgress.value }) {
-                    CompactTopBar(controller, view, window, onShowSidebar, onOverview = { overview = true }, onArrange = { arranging = true }, onMessage = onMessage, onOpenPalette = { palette = true }, onOpenDetached = { showDetached = true })
+                    CompactTopBar(controller, view, window, onShowSidebar, onOverview = { overview = true }, onArrange = { arranging = true }, onMessage = onMessage, onOpenPalette = { palette = true }, onOpenDetached = { showDetached = true }, onOpenSaved = onOpenSaved)
                 }
             }
             var lastOffline by remember { mutableStateOf("") }
@@ -570,6 +575,7 @@ fun Workspace(
                         onOpenComposer = { composer = true },
                         onOpenPalette = { palette = true },
                         onOpenDetached = { showDetached = true },
+                        onOpenSaved = onOpenSaved,
                         onMessage = onMessage,
                     )
                 }
@@ -636,6 +642,7 @@ private fun CompactTopBar(
     onMessage: (String) -> Unit,
     onOpenPalette: () -> Unit,
     onOpenDetached: () -> Unit,
+    onOpenSaved: () -> Unit,
 ) {
     val connection = controller.connection
     val folders by connection.folders.collectAsStateWithLifecycle()
@@ -665,8 +672,43 @@ private fun CompactTopBar(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        SaveButton(controller, onOpenSaved, filled = false)
         RoundButton(Icons.Rounded.GridView, "All windows", filled = false, tint = muted, onClick = onOverview)
         ActionsMenu(controller, view, window, onArrange, onMessage, filled = false, onOpenPalette = onOpenPalette, onOpenDetached = onOpenDetached)
+    }
+}
+
+/**
+ * Keeps the pane that has the keyboard on the phone to read offline: an agent's as its
+ * conversation, any other as its terminal. Held, it opens the panes saved so far. It shows a
+ * tick for a moment once the pane is saved.
+ */
+@Composable
+private fun SaveButton(controller: WorkspaceController, onOpenSaved: () -> Unit, filled: Boolean) {
+    val scheme = MaterialTheme.colorScheme
+    val view = LocalView.current
+    var saved by remember { mutableStateOf(false) }
+    LaunchedEffect(saved) {
+        if (saved) {
+            delay(1800)
+            saved = false
+        }
+    }
+    RoundButton(
+        if (saved) Icons.Rounded.BookmarkAdded else Icons.Rounded.BookmarkAdd,
+        if (saved) "Saved" else "Save this pane to read offline. Hold to open saved panes.",
+        filled = filled,
+        tint = if (saved) scheme.primary else if (filled) scheme.onSurface else scheme.onSurfaceVariant,
+        onLongClick = {
+            view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            onOpenSaved()
+        },
+    ) {
+        val block = controller.focusedBlockId ?: return@RoundButton
+        controller.savePane(block) {
+            saved = true
+            view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+        }
     }
 }
 
@@ -683,6 +725,7 @@ private fun SideRail(
     onOpenComposer: () -> Unit,
     onOpenPalette: () -> Unit,
     onOpenDetached: () -> Unit,
+    onOpenSaved: () -> Unit,
     onMessage: (String) -> Unit,
 ) {
     Column(
@@ -696,6 +739,7 @@ private fun SideRail(
             RoundButton(Icons.Rounded.ViewSidebar, "Show sessions", onClick = onShowSidebar)
         }
         RoundButton(Icons.Rounded.GridView, "All windows", onClick = onOverview)
+        SaveButton(controller, onOpenSaved, filled = true)
         ActionsMenu(controller, view, window, onArrange, onMessage, filled = true, onOpenPalette = onOpenPalette, onOpenDetached = onOpenDetached)
         // With the tab strip hidden, Compose lives here instead.
         AnimatedVisibility(!sidebarHidden, enter = scale, exit = shrink) {
