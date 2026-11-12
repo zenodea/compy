@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <android/bitmap.h>
+#include <android/imagedecoder.h>
 #include <ghostty/vt.h>
 
 typedef struct {
@@ -12,6 +14,7 @@ typedef struct {
   GhosttyRenderStateRowIterator rows;
   GhosttyRenderStateRowCells cells;
   GhosttySearch search;
+  GhosttyRenderStateImageIterator images;
   /* Rows asked for above the screen. */
   int above;
 } Term;
@@ -19,7 +22,7 @@ typedef struct {
 enum {
   META_COLS, META_ROWS, META_BG, META_FG, META_CURSOR_COLOR, META_CURSOR_VISIBLE, META_CURSOR_X,
   META_CURSOR_Y, META_CURSOR_STYLE, META_SCROLL_TOTAL, META_SCROLL_OFFSET, META_SCROLL_LEN,
-  META_MOUSE, META_ALT, META_BRACKETED, META_CURSOR_BLINK, META_EXTRAS_LEN, META_ABOVE, META_COUNT
+  META_MOUSE, META_ALT, META_BRACKETED, META_CURSOR_BLINK, META_EXTRAS_LEN, META_ABOVE, META_CELL_W, META_CELL_H, META_COUNT
 };
 
 enum { FLAG_BOLD = 1, FLAG_ITALIC = 2, FLAG_FAINT = 4, FLAG_INVERSE = 8, FLAG_INVISIBLE = 16,
@@ -40,10 +43,48 @@ static inline jint rgb(GhosttyColorRgb c) {
  * be far larger, and every pane Compy keeps warm holds its scrollback in memory. */
 #define SCROLLBACK_MAX_BYTES ((size_t)8 * 1024 * 1024)
 
+/* Pictures a program draws are kept per terminal too. Without a limit the engine takes none. */
+#define IMAGES_MAX_BYTES ((uint64_t)24 * 1024 * 1024)
+
+/* Ints written for each picture on screen. */
+#define IMAGE_INTS 13
+
+/* Decodes a PNG that a program sent into the plain RGBA the engine stores, with Android's own decoder. */
+static bool decode_png(void* userdata, const GhosttyAllocator* allocator, const uint8_t* data, size_t len,
+                       GhosttySysImage* out) {
+  AImageDecoder* decoder = NULL;
+  if (AImageDecoder_createFromBuffer(data, len, &decoder) != ANDROID_IMAGE_DECODER_SUCCESS) return false;
+  bool ok = false;
+  const AImageDecoderHeaderInfo* info = AImageDecoder_getHeaderInfo(decoder);
+  int32_t width = AImageDecoderHeaderInfo_getWidth(info);
+  int32_t height = AImageDecoderHeaderInfo_getHeight(info);
+  if (width > 0 && height > 0 &&
+      AImageDecoder_setAndroidBitmapFormat(decoder, ANDROID_BITMAP_FORMAT_RGBA_8888) == ANDROID_IMAGE_DECODER_SUCCESS &&
+      AImageDecoder_setUnpremultipliedRequired(decoder, true) == ANDROID_IMAGE_DECODER_SUCCESS) {
+    size_t stride = (size_t)width * 4;
+    size_t size = stride * (size_t)height;
+    uint8_t* pixels = ghostty_alloc(allocator, size);
+    if (pixels) {
+      if (AImageDecoder_decodeImage(decoder, pixels, stride, size) == ANDROID_IMAGE_DECODER_SUCCESS) {
+        out->width = (uint32_t)width;
+        out->height = (uint32_t)height;
+        out->data = pixels;
+        out->data_len = size;
+        ok = true;
+      } else {
+        ghostty_free(allocator, pixels, size);
+      }
+    }
+  }
+  AImageDecoder_delete(decoder);
+  return ok;
+}
+
 /* Frees a handle and everything it owns. Every ghostty free accepts NULL. */
 static void destroy(Term* h) {
   if (!h) return;
   ghostty_search_free(h->search);
+  ghostty_render_state_image_iterator_free(h->images);
   ghostty_render_state_row_cells_free(h->cells);
   ghostty_render_state_row_iterator_free(h->rows);
   ghostty_render_state_free(h->rs);
@@ -61,6 +102,12 @@ static Term* wrap(GhosttyTerminal t) {
   h->term = t;
   const size_t max_scrollback = SCROLLBACK_MAX_BYTES;
   ghostty_terminal_set(t, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &max_scrollback);
+  /* Once for every terminal. Setting it again to the same function is harmless. */
+  ghostty_sys_set(GHOSTTY_SYS_OPT_DECODE_PNG, (const void*)decode_png);
+  const uint64_t max_images = IMAGES_MAX_BYTES;
+  ghostty_terminal_set(t, GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, &max_images);
+  /* Pictures are an extra: a terminal without the iterator simply shows none. */
+  ghostty_render_state_image_iterator_new(NULL, &h->images);
   if (ghostty_render_state_new(NULL, &h->rs) != GHOSTTY_SUCCESS ||
       ghostty_render_state_row_iterator_new(NULL, &h->rows) != GHOSTTY_SUCCESS ||
       ghostty_render_state_row_cells_new(NULL, &h->cells) != GHOSTTY_SUCCESS) {
@@ -196,6 +243,12 @@ JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeRender(
   ghostty_render_state_get(h->rs, GHOSTTY_RENDER_STATE_DATA_ROWS, &rows);
   meta[META_COLS] = cols;
   meta[META_ROWS] = rows;
+  /* The size of a cell where the terminal's size was set, which pictures are measured in. */
+  uint32_t width_px = 0, height_px = 0;
+  ghostty_terminal_get(h->term, GHOSTTY_TERMINAL_DATA_WIDTH_PX, &width_px);
+  ghostty_terminal_get(h->term, GHOSTTY_TERMINAL_DATA_HEIGHT_PX, &height_px);
+  meta[META_CELL_W] = cols ? (jint)(width_px / cols) : 0;
+  meta[META_CELL_H] = rows ? (jint)(height_px / rows) : 0;
 
   GhosttyRenderStateColors colors = GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);
   ghostty_render_state_get(h->rs, GHOSTTY_RENDER_STATE_DATA_COLORS, &colors);
@@ -327,6 +380,94 @@ JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeRender(
   (*env)->SetIntArrayRegion(env, metaArr, 0, META_COUNT, meta);
   ghostty_render_state_clean(h->rs);
   return JNI_TRUE;
+}
+
+// Writes the pictures on screen as of the last render, IMAGE_INTS for each: id, generation, above
+// text, column, row, offset x and y inside that cell, width, height, and the part of the picture
+// shown as x, y, width, height. Returns how many it wrote.
+JNIEXPORT jint JNICALL Java_dev_compy_term_GhosttyTerminal_nativeImages(
+    JNIEnv* env, jclass cls, jlong handle, jintArray out) {
+  Term* h = (Term*)(intptr_t)handle;
+  if (!h->images) return 0;
+  if (ghostty_render_state_get(h->rs, GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR, &h->images) != GHOSTTY_SUCCESS) return 0;
+  jsize cap = (*env)->GetArrayLength(env, out) / IMAGE_INTS;
+  jint count = 0;
+  while (count < cap && ghostty_render_state_image_iterator_next(h->images)) {
+    GhosttyImageProtocol protocol = 0;
+    GhosttyRenderStateImageLayer layer = 0;
+    uint32_t id = 0, off_x = 0, off_y = 0, width = 0, height = 0, sx = 0, sy = 0, sw = 0, sh = 0;
+    uint64_t generation = 0;
+    int32_t col = 0, row = 0;
+    const GhosttyRenderStateImageData keys[] = {
+      GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL, GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_ID,
+      GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_GENERATION, GHOSTTY_RENDER_STATE_IMAGE_DATA_LAYER,
+      GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_COL, GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_ROW,
+      GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_X, GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_Y,
+      GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_WIDTH, GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_HEIGHT,
+      GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_X, GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_Y,
+      GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_WIDTH, GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_HEIGHT,
+    };
+    void* values[] = { &protocol, &id, &generation, &layer, &col, &row, &off_x, &off_y,
+                       &width, &height, &sx, &sy, &sw, &sh };
+    if (ghostty_render_state_image_get_multi(h->images, sizeof(keys) / sizeof(keys[0]), keys, values, NULL) != GHOSTTY_SUCCESS) continue;
+    if (protocol != GHOSTTY_IMAGE_PROTOCOL_KITTY || width == 0 || height == 0 || sw == 0 || sh == 0) continue;
+    jint v[IMAGE_INTS] = {
+      (jint)id, (jint)(generation ^ (generation >> 32)), layer == GHOSTTY_RENDER_STATE_IMAGE_LAYER_ABOVE_TEXT,
+      col, row, (jint)off_x, (jint)off_y, (jint)width, (jint)height, (jint)sx, (jint)sy, (jint)sw, (jint)sh,
+    };
+    (*env)->SetIntArrayRegion(env, out, count * IMAGE_INTS, IMAGE_INTS, v);
+    count++;
+  }
+  return count;
+}
+
+// A picture's pixels as RGBA with color already multiplied by alpha, which is how Android keeps
+// a bitmap. Writes its width and height into `size`. Null when there is no such picture.
+JNIEXPORT jbyteArray JNICALL Java_dev_compy_term_GhosttyTerminal_nativeImagePixels(
+    JNIEnv* env, jclass cls, jlong handle, jint id, jintArray size) {
+  Term* h = (Term*)(intptr_t)handle;
+  GhosttyKittyGraphics graphics = NULL;
+  if (ghostty_terminal_get(h->term, GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &graphics) != GHOSTTY_SUCCESS || !graphics) return NULL;
+  GhosttyKittyGraphicsImage image = ghostty_kitty_graphics_image(graphics, (uint32_t)id);
+  if (!image) return NULL;
+  uint32_t w = 0, hgt = 0;
+  GhosttyKittyImageFormat format = 0;
+  const uint8_t* data = NULL;
+  size_t len = 0;
+  ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_WIDTH, &w);
+  ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_HEIGHT, &hgt);
+  ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_FORMAT, &format);
+  ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_DATA_PTR, &data);
+  ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_DATA_LEN, &len);
+  if (!data || w == 0 || hgt == 0 || w > 8192 || hgt > 8192) return NULL;
+  size_t n = (size_t)w * hgt;
+  size_t per = format == GHOSTTY_KITTY_IMAGE_FORMAT_RGB ? 3 : format == GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA ? 2 :
+               format == GHOSTTY_KITTY_IMAGE_FORMAT_GRAY ? 1 : 4;
+  if (len < n * per) return NULL;
+  uint8_t* px = malloc(n * 4);
+  if (!px) return NULL;
+  for (size_t i = 0; i < n; i++) {
+    const uint8_t* in = data + i * per;
+    uint32_t r, g, b, a;
+    switch (per) {
+      case 3: r = in[0]; g = in[1]; b = in[2]; a = 255; break;
+      case 2: r = g = b = in[0]; a = in[1]; break;
+      case 1: r = g = b = in[0]; a = 255; break;
+      default: r = in[0]; g = in[1]; b = in[2]; a = in[3]; break;
+    }
+    px[i * 4] = (uint8_t)((r * a + 127) / 255);
+    px[i * 4 + 1] = (uint8_t)((g * a + 127) / 255);
+    px[i * 4 + 2] = (uint8_t)((b * a + 127) / 255);
+    px[i * 4 + 3] = (uint8_t)a;
+  }
+  jbyteArray out = (*env)->NewByteArray(env, (jsize)(n * 4));
+  if (out) {
+    (*env)->SetByteArrayRegion(env, out, 0, (jsize)(n * 4), (const jbyte*)px);
+    jint dims[2] = { (jint)w, (jint)hgt };
+    (*env)->SetIntArrayRegion(env, size, 0, 2, dims);
+  }
+  free(px);
+  return out;
 }
 
 static bool viewport_ref(Term* h, int x, int y, GhosttyGridRef* ref) {

@@ -9,5 +9,5 @@ set_target_properties(ghostty-vt PROPERTIES IMPORTED_LOCATION "${GHOSTTY_DIR}/li
 add_library(compyterm SHARED compyterm.c stub.cpp)
 target_compile_definitions(compyterm PRIVATE GHOSTTY_STATIC)
 target_include_directories(compyterm PRIVATE "${GHOSTTY_DIR}/include")
-target_link_libraries(compyterm ghostty-vt log)
+target_link_libraries(compyterm ghostty-vt log jnigraphics)
 target_link_options(compyterm PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,--gc-sections" "-s")

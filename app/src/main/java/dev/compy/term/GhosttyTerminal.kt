@@ -44,8 +44,28 @@ class GhosttyTerminal private constructor(private var handle: Long) {
             cells = IntArray(needed)
             updated = nativeRender(handle, meta, cells, extras, true, above)
         }
-        if (updated) frame++
+        if (updated) {
+            frame++
+            imageCount = nativeImages(handle, images)
+        }
         updated
+    }
+
+    /** The pictures on screen as of the last frame, [IMAGE_INTS] for each of [imageCount]. */
+    val images = IntArray(IMAGE_INTS * MAX_IMAGES)
+    var imageCount = 0
+        private set
+
+    /** A picture a program drew, or null when it is gone or too large. Made new on every call. */
+    fun imageBitmap(id: Int): android.graphics.Bitmap? = synchronized(lock) {
+        if (handle == 0L) return null
+        val size = IntArray(2)
+        val pixels = nativeImagePixels(handle, id, size) ?: return null
+        runCatching {
+            android.graphics.Bitmap.createBitmap(size[0], size[1], android.graphics.Bitmap.Config.ARGB_8888).also {
+                it.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(pixels))
+            }
+        }.getOrNull()
     }
 
     fun selectRange(x1: Int, y1: Int, x2: Int, y2: Int) = synchronized(lock) {
@@ -119,7 +139,17 @@ class GhosttyTerminal private constructor(private var handle: Long) {
         const val META_EXTRAS_LEN = 16
         /** How many lines above the screen follow the screen's own rows. */
         const val META_ABOVE = 17
-        const val META_COUNT = 18
+        /** A cell's size in pixels where the terminal's size was set, which pictures are measured in. */
+        const val META_CELL_W = 18
+        const val META_CELL_H = 19
+        const val META_COUNT = 20
+
+        /**
+         * Ints for each picture: id, generation, above text, column, row, offset x and y in that
+         * cell, width, height, and the part of the picture shown as x, y, width, height.
+         */
+        const val IMAGE_INTS = 13
+        const val MAX_IMAGES = 64
 
         /** How many ints a frame of this size takes: four per cell, with [above] rows past the screen's. */
         fun cellsNeeded(cols: Int, rows: Int, above: Int) = cols * (rows + above) * 4
@@ -165,6 +195,8 @@ class GhosttyTerminal private constructor(private var handle: Long) {
         @JvmStatic private external fun nativeScrollToBottom(h: Long)
         @JvmStatic private external fun nativeSetColors(h: Long, fg: Int, bg: Int, cursor: Int, palette: IntArray?)
         @JvmStatic private external fun nativeRender(h: Long, meta: IntArray, cells: IntArray, extras: IntArray, force: Boolean, above: Int): Boolean
+        @JvmStatic private external fun nativeImages(h: Long, out: IntArray): Int
+        @JvmStatic private external fun nativeImagePixels(h: Long, id: Int, size: IntArray): ByteArray?
         @JvmStatic private external fun nativeSelectRange(h: Long, x1: Int, y1: Int, x2: Int, y2: Int): Boolean
         @JvmStatic private external fun nativeSelectWord(h: Long, x: Int, y: Int): Boolean
         @JvmStatic private external fun nativeExtendSelection(h: Long, x: Int, y: Int): Boolean

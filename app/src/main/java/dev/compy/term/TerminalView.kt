@@ -149,6 +149,13 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     private var haveFrame = false
     private var chars = CharArray(512)
 
+    // Pictures a program drew, as of the frame held here, and their bitmaps while they are on screen.
+    private val images = IntArray(GhosttyTerminal.IMAGE_INTS * GhosttyTerminal.MAX_IMAGES)
+    private var imageCount = 0
+    private val bitmaps = HashMap<Long, android.graphics.Bitmap>()
+    private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val imageSource = android.graphics.Rect()
+
     /** Keeps text clear of the pane's rounded corners. */
     private val padding = Math.round(8 * density).toFloat()
 
@@ -244,6 +251,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         haveFrame = false
         scrollFrac = 0f
         links = emptyList()
+        dropImages()
         // A terminal that arrives at another device's size is about to be fitted to this one.
         sizeChangedAt = SystemClock.uptimeMillis()
         newSession?.addListener(this)
@@ -372,6 +380,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         }
         val isNew = terminal !== boundTerminal
         boundTerminal = terminal
+        // Another terminal numbers its pictures from the start again.
+        if (isNew) dropImages()
         val changed = synchronized(terminal.lock) {
             terminal.render(isNew || !haveFrame || wantAbove != gotAbove, wantAbove)
             // Another view of this terminal may have taken the change, so go by the frame's number.
@@ -384,6 +394,9 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                 if (cells.size < needed) cells = IntArray(needed)
                 terminal.cells.copyInto(cells, 0, 0, min(needed, terminal.cells.size))
                 terminal.extras.copyInto(extras, 0, 0, meta[GhosttyTerminal.META_EXTRAS_LEN])
+                imageCount = terminal.imageCount
+                terminal.images.copyInto(images, 0, 0, imageCount * GhosttyTerminal.IMAGE_INTS)
+                loadImages(terminal)
                 haveFrame = true
             }
             updated
@@ -467,8 +480,10 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         canvas.save()
         canvas.translate(originX, originY)
         canvas.scale(s, s)
+        drawImages(canvas, above = false)
         drawRows(canvas, cols, rows, defaultFg, defaultBg)
         canvas.translate(0f, scrollFrac)
+        drawImages(canvas, above = true)
         drawLinks(canvas, defaultFg)
         if (searchActive) drawSearchHighlights(canvas, terminal, cols)
         drawCursor(canvas, cols, rows, defaultFg, defaultBg)
@@ -511,6 +526,56 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         if (!linksStale || !haveFrame) return
         linksStale = false
         links = TerminalLinks.find(rowText())
+    }
+
+    private fun imageKey(at: Int) = (images[at].toLong() shl 32) or (images[at + 1].toLong() and 0xFFFFFFFFL)
+
+    /**
+     * Makes bitmaps for pictures that came on screen and drops those that left, so a program
+     * redrawing a picture over and over doesn't pile them up. Called while the terminal is held,
+     * since the pixels are read out of it.
+     */
+    private fun loadImages(terminal: GhosttyTerminal) {
+        if (imageCount == 0 && bitmaps.isEmpty()) return
+        val shown = HashSet<Long>(imageCount)
+        for (i in 0 until imageCount) {
+            val at = i * GhosttyTerminal.IMAGE_INTS
+            val key = imageKey(at)
+            shown += key
+            if (key !in bitmaps) terminal.imageBitmap(images[at])?.let { bitmaps[key] = it }
+        }
+        val gone = bitmaps.keys.filter { it !in shown }
+        for (key in gone) bitmaps.remove(key)?.recycle()
+    }
+
+    private fun dropImages() {
+        for (bitmap in bitmaps.values) bitmap.recycle()
+        bitmaps.clear()
+        imageCount = 0
+    }
+
+    /**
+     * Draws the pictures that sit under the text, or the ones over it. A picture's place and size
+     * are in pixels of the terminal as it was sized, so they are scaled to this view's cells.
+     */
+    private fun drawImages(canvas: Canvas, above: Boolean) {
+        if (imageCount == 0) return
+        val theirW = meta[GhosttyTerminal.META_CELL_W]
+        val theirH = meta[GhosttyTerminal.META_CELL_H]
+        val kx = if (theirW > 0) cellW / theirW else 1f
+        val ky = if (theirH > 0) cellH / theirH else 1f
+        // The first pass runs before the rows are moved down by a part row; the second after.
+        val shift = if (above) 0f else scrollFrac
+        for (i in 0 until imageCount) {
+            val at = i * GhosttyTerminal.IMAGE_INTS
+            if ((images[at + 2] != 0) != above) continue
+            val bitmap = bitmaps[imageKey(at)] ?: continue
+            val left = images[at + 3] * cellW + images[at + 5] * kx
+            val top = images[at + 4] * cellH + images[at + 6] * ky + shift
+            imageSource.set(images[at + 9], images[at + 10], images[at + 9] + images[at + 11], images[at + 10] + images[at + 12])
+            rect.set(left, top, left + images[at + 7] * kx, top + images[at + 8] * ky)
+            canvas.drawBitmap(bitmap, imageSource, rect, bitmapPaint)
+        }
     }
 
     /** How many rows above the newest line the view is scrolled. */
@@ -625,7 +690,9 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             val i = rowOffset + x * 4
             val cp = cells[i]
             val flags = cells[i + 3]
-            if (cp == 0 || flags and FLAG_SPACER != 0 || flags and FLAG_INVISIBLE != 0 || (cp == 0x20 && flags and DECORATIONS == 0)) {
+            if (cp == 0 || cp == IMAGE_PLACEHOLDER || flags and FLAG_SPACER != 0 || flags and FLAG_INVISIBLE != 0 ||
+                (cp == 0x20 && flags and DECORATIONS == 0)
+            ) {
                 x++
                 continue
             }
@@ -1570,6 +1637,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         linksPending = false
         scroller.forceFinished(true)
         rowNodes.clear()
+        dropImages()
     }
 
     /**
@@ -1656,6 +1724,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         /** How long the text keeps its size while the server is asked to fit the terminal. */
         private const val FIT_WAIT_MS = 1500L
         private const val LINK_DELAY_MS = 120L
+        /** The character a program writes where a picture goes; the picture is drawn, not this. */
+        private const val IMAGE_PLACEHOLDER = 0x10EEEE
         private const val EDGE_SCROLL_MS = 45L
         private const val MAX_CURSOR_STEPS = 400
         private const val RULER = "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM"
