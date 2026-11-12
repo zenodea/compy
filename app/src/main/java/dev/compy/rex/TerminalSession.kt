@@ -18,6 +18,35 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.CopyOnWriteArrayList
 
+/** Something a terminal view can show: a live pane, or one that was saved to read later. */
+interface TerminalSource {
+    val terminal: GhosttyTerminal?
+    fun addListener(l: TerminalSession.Listener)
+    fun removeListener(l: TerminalSession.Listener)
+}
+
+/** A terminal read back from a saved pane. It has no server behind it and never changes by itself. */
+class SavedTerminal(override val terminal: GhosttyTerminal) : TerminalSource {
+    private val listeners = CopyOnWriteArrayList<TerminalSession.Listener>()
+
+    override fun addListener(l: TerminalSession.Listener) {
+        listeners += l
+        l.onTerminalChanged()
+    }
+
+    override fun removeListener(l: TerminalSession.Listener) {
+        listeners -= l
+    }
+
+    /** Fits the text to the view showing it, which rewraps its lines. */
+    fun resize(cols: Int, rows: Int, cellW: Int, cellH: Int) {
+        terminal.resize(cols, rows, cellW, cellH)
+        listeners.forEach { it.onTerminalChanged() }
+    }
+
+    fun close() = terminal.close()
+}
+
 /**
  * The live contents of one terminal block: its stream from the server and the local engine that
  * interprets it. Views attach and detach; the stream keeps the engine current between them.
@@ -36,7 +65,7 @@ class TerminalSession(
     private val onHostTheme: (TerminalColors) -> Unit = {},
     /** The host's usual colors, for a terminal that doesn't report any of its own. */
     private val hostFallback: () -> TerminalColors? = { null },
-) {
+) : TerminalSource {
     interface Listener {
         /** New output arrived, or anything else that changes what's drawn. */
         fun onTerminalChanged()
@@ -44,7 +73,7 @@ class TerminalSession(
 
     enum class State { Connecting, Live, Reconnecting, Closed }
 
-    @Volatile var terminal: GhosttyTerminal? = null
+    @Volatile override var terminal: GhosttyTerminal? = null
         private set
     @Volatile var state = State.Connecting
         private set
@@ -72,12 +101,12 @@ class TerminalSession(
     @Volatile private var theme: TerminalColors? = null
     @Volatile private var localTheme: TerminalColors? = null
 
-    fun addListener(l: Listener) {
+    override fun addListener(l: Listener) {
         listeners += l
         l.onTerminalChanged()
     }
 
-    fun removeListener(l: Listener) {
+    override fun removeListener(l: Listener) {
         listeners -= l
     }
 

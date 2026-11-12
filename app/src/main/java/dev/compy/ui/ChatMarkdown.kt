@@ -3,6 +3,7 @@ package dev.compy.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -189,19 +190,23 @@ internal fun MarkdownText(source: String, color: Color, modifier: Modifier = Mod
                     Text(block.marker, Modifier.width(if (block.marker == "•") 14.dp else 22.dp), style = body, color = scheme.onSurfaceVariant)
                     Text(inlineMarkdown(block.text, codeBg, scheme.primary), style = body, color = color)
                 }
-                is MdBlock.Code -> Text(
-                    block.text,
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(codeBg)
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = color,
-                    softWrap = false,
-                )
+                is MdBlock.Code -> Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(codeBg)) {
+                    Text(
+                        block.text,
+                        Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            // Room on the right, so the copy button doesn't sit on the first line.
+                            .padding(start = 10.dp, top = 8.dp, end = 34.dp, bottom = 8.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = color,
+                        softWrap = false,
+                    )
+                    androidx.compose.foundation.text.selection.DisableSelection {
+                        CopyButton(block.text, Modifier.align(androidx.compose.ui.Alignment.TopEnd).padding(2.dp))
+                    }
+                }
                 is MdBlock.Quote -> Text(
                     inlineMarkdown(block.text, codeBg, scheme.primary),
                     Modifier.padding(start = 10.dp),

@@ -105,6 +105,30 @@ class CodexTranscriptTest {
     }
 
     @Test
+    fun theSameWordsSaidAgainAreShownAgain() {
+        val entries = read(
+            item("""{"type":"AgentMessage","id":"m1","content":[{"type":"Text","text":"Done."}]}"""),
+            response("""{"type":"message","id":"m1","role":"assistant","content":[{"type":"output_text","text":"Done."}]}"""),
+            item("""{"type":"UserMessage","id":"u2","content":[{"type":"text","text":"again"}]}"""),
+            item("""{"type":"AgentMessage","id":"m2","content":[{"type":"Text","text":"Done."}]}"""),
+            response("""{"type":"message","id":"m2","role":"assistant","content":[{"type":"output_text","text":"Done."}]}"""),
+            // With no ids to go by, the pair is still told by its two kinds of record.
+            item("""{"type":"AgentMessage","content":[{"type":"Text","text":"Done."}]}"""),
+            response("""{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}"""),
+            // A version that writes only one kind of record says the same thing twice in a row.
+            item("""{"type":"AgentMessage","content":[{"type":"Text","text":"Done."}]}"""),
+            item("""{"type":"AgentMessage","content":[{"type":"Text","text":"Done."}]}"""),
+        )
+        assertEquals(listOf("Done.", "again", "Done.", "Done.", "Done.", "Done."), entries.map {
+            when (it) {
+                is ChatEntry.Assistant -> it.text
+                is ChatEntry.User -> it.text
+                else -> "?"
+            }
+        })
+    }
+
+    @Test
     fun showsACommandWithItsOutput() {
         val entries = read(
             // The wrapper every command goes through is left out; the command itself is an item.
@@ -203,5 +227,41 @@ class PiTranscriptTest {
             """{"type":"custom","customType":"state","data":{}}""",
         )
         assertEquals(listOf("Conversation compacted", "Subagent finished"), entries.map { (it as ChatEntry.Notice).text })
+    }
+}
+
+class SavedChatTest {
+    private val entries = listOf(
+        ChatEntry.User("1", "Fix the build", listOf(ChatImage(10, 1, 400), null)),
+        ChatEntry.Thinking("2", "Looking at the Makefile"),
+        ChatEntry.Tool("3", "c1", "Shell", "make build", "make build -j4", ToolResult(false, "error: count undeclared")),
+        ChatEntry.Assistant("4", "It was a missing declaration."),
+        ChatEntry.Notice("5", "Conversation compacted"),
+    )
+
+    @Test
+    fun aConversationComesBackAsItWasSaved() {
+        assertEquals(entries, decodeChat(encodeChat(entries)))
+        assertEquals(null, decodeChat("not a conversation".toByteArray()))
+    }
+
+    @Test
+    fun aLongConversationKeepsItsEnd() {
+        val long = (1..100).map { ChatEntry.Assistant("$it", "x".repeat(1000)) }
+        val kept = newestWithin(long, 10_000)
+        assertEquals("100", kept.last().key)
+        assertTrue(kept.size in 5..10)
+        // Even one entry over the limit is kept, rather than saving nothing.
+        assertEquals(1, newestWithin(long, 10).size)
+        assertEquals(entries, newestWithin(entries, 1_000_000))
+    }
+
+    @Test
+    fun searchLooksThroughWhatEachEntrySays() {
+        assertEquals(listOf(0, 2), chatMatches(entries, "BUILD"))
+        assertEquals(listOf(2), chatMatches(entries, "undeclared"))
+        assertEquals(listOf(4), chatMatches(entries, " compacted "))
+        assertEquals(emptyList<Int>(), chatMatches(entries, "   "))
+        assertEquals(emptyList<Int>(), chatMatches(entries, "nowhere"))
     }
 }

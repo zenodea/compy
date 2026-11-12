@@ -69,7 +69,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.compy.AppState
 import kotlinx.coroutines.launch
 
-private enum class Screen { Main, Board, Settings, AddServer }
+private enum class Screen { Main, Board, Saved, Settings, AddServer }
 
 /** Top-level navigation: the lock, the workspace, settings and adding a server. */
 @Composable
@@ -160,6 +160,7 @@ fun CompyRoot(app: AppState, activity: FragmentActivity) {
                     onDone = { screen = Screen.Main },
                 )
                 Screen.Settings -> SettingsScreen(app, onBack = { screen = Screen.Main })
+                Screen.Saved -> SavedPanes(app, onBack = { screen = Screen.Main })
                 Screen.Board -> AgentBoard(
                     app,
                     onBack = { screen = Screen.Main },
@@ -176,6 +177,7 @@ fun CompyRoot(app: AppState, activity: FragmentActivity) {
                     onSidebarOpen = { sidebarOpen = it },
                     onOpenSettings = { screen = Screen.Settings },
                     onOpenBoard = { screen = Screen.Board },
+                    onOpenSaved = { screen = Screen.Saved },
                     onAddServer = { screen = Screen.AddServer },
                     onMessage = showMessage,
                 )
@@ -195,6 +197,7 @@ private fun MainLayout(
     onSidebarOpen: (Boolean) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenBoard: () -> Unit,
+    onOpenSaved: () -> Unit,
     onAddServer: () -> Unit,
     onMessage: (String) -> Unit,
 ) {
@@ -269,6 +272,7 @@ private fun MainLayout(
                         app, Modifier.fillMaxSize(),
                         onOpenSettings = onOpenSettings,
                         onOpenBoard = onOpenBoard,
+                        onOpenSaved = onOpenSaved,
                         onAddServer = onAddServer,
                         onOpened = { onShowList(false) },
                         onMessage = onMessage,
@@ -312,6 +316,7 @@ private fun MainLayout(
                             app, Modifier.fillMaxWidth(),
                             onOpenSettings = onOpenSettings,
                             onOpenBoard = onOpenBoard,
+                            onOpenSaved = onOpenSaved,
                             onAddServer = onAddServer,
                             onOpened = { onShowList(false) },
                             onMessage = onMessage,

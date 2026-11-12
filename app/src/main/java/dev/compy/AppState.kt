@@ -123,6 +123,11 @@ class AppState(private val context: Context) : DefaultLifecycleObserver {
 
     val notifier = AlertNotifier(context, this)
 
+    /** Panes kept on the phone to read without a connection. */
+    val saved = dev.compy.data.SavedPaneStore(java.io.File(context.filesDir, "saved")).also { store ->
+        scope.launch(Dispatchers.IO) { store.load() }
+    }
+
     private var pauseJob: Job? = null
     private var leftAt = 0L
 

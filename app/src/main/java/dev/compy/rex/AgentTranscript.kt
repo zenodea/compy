@@ -1,5 +1,8 @@
 package dev.compy.rex
 
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -11,14 +14,21 @@ import kotlinx.serialization.json.booleanOrNull
  * One item of an agent's conversation, read from the transcript its harness writes rather than
  * from its screen. [key] is unique within a session and stays the same as more is read.
  */
+@Serializable
 sealed interface ChatEntry {
     val key: String
 
+    @Serializable @SerialName("user")
     data class User(override val key: String, val text: String, val images: List<ChatImage?> = emptyList()) : ChatEntry
+
+    @Serializable @SerialName("assistant")
     data class Assistant(override val key: String, val text: String) : ChatEntry
+
+    @Serializable @SerialName("thinking")
     data class Thinking(override val key: String, val text: String) : ChatEntry
 
     /** A tool call, with its result once the transcript has it. */
+    @Serializable @SerialName("tool")
     data class Tool(
         override val key: String,
         val callId: String,
@@ -29,9 +39,11 @@ sealed interface ChatEntry {
     ) : ChatEntry
 
     /** Something about the session itself, such as "Conversation compacted". */
+    @Serializable @SerialName("notice")
     data class Notice(override val key: String, val text: String) : ChatEntry
 }
 
+@Serializable
 data class ToolResult(val ok: Boolean, val output: String, val images: List<ChatImage?> = emptyList())
 
 /**
@@ -39,6 +51,7 @@ data class ToolResult(val ok: Boolean, val output: String, val images: List<Chat
  * is: the line's offset and the image's place in that line. Null where an older compy.lua sent the
  * line without saying where its image was.
  */
+@Serializable
 data class ChatImage(val offset: Long, val index: Int, val bytes: Int)
 
 private fun imageOf(block: JsonObject): ChatImage? {
@@ -218,6 +231,7 @@ class ClaudeTranscriptParser : TranscriptParser {
  * A tool's result before [joinResults] puts it on its call. Results whose call wasn't loaded
  * (it came before the oldest line read) are dropped there, so none reach the screen.
  */
+@Serializable @SerialName("result")
 data class ResultEntry(override val key: String, val callId: String, val result: ToolResult) : ChatEntry
 
 /** Puts results on their calls, keeping the order the agent wrote the calls in. */
@@ -234,16 +248,34 @@ fun joinResults(entries: List<ChatEntry>): List<ChatEntry> {
 
 private const val OMITTED = "A message too large to show was left out"
 
-/** Remembers the last few texts shown, for transcripts that write the same message twice. */
-private class Seen(private val limit: Int = 64) {
-    private val recent = ArrayDeque<String>()
+/**
+ * Tells the second record of a message from the first. Codex writes what the agent says twice,
+ * once as a finished item and once as the model's own record, one right after the other. The
+ * second is known by carrying the first one's id, or by saying the same thing through the other
+ * of the two records. The same words said again later are a new message, and are shown.
+ */
+private class Twice(private val limit: Int = 64) {
+    private val ids = ArrayDeque<String>()
+    private var lastText: String? = null
+    private var lastSource: String? = null
 
-    /** True the first time [text] comes by, false while it is still remembered. */
-    fun first(text: String): Boolean {
-        if (text in recent) return false
-        recent.addLast(text)
-        if (recent.size > limit) recent.removeFirst()
-        return true
+    /** True when this record is the second of a pair, and so not to be shown again. */
+    fun second(id: String?, text: String, source: String): Boolean {
+        val byId = id != null && id in ids
+        val byText = text == lastText && source != lastSource
+        if (byId || byText) {
+            // The pair is complete. The same words from here on are someone saying them again.
+            lastText = null
+            lastSource = null
+            return true
+        }
+        if (id != null) {
+            ids.addLast(id)
+            if (ids.size > limit) ids.removeFirst()
+        }
+        lastText = text
+        lastSource = source
+        return false
     }
 }
 
@@ -255,7 +287,7 @@ private class Seen(private val limit: Int = 64) {
  * arrives both ways is shown once.
  */
 class CodexTranscriptParser : TranscriptParser {
-    private val said = Seen()
+    private val said = Twice()
     private var lastNotice: String? = null
 
     override fun parse(line: String, key: String): List<ChatEntry> {
@@ -280,9 +312,9 @@ class CodexTranscriptParser : TranscriptParser {
         }
     }
 
-    private fun assistant(text: String?, key: String): List<ChatEntry> {
+    private fun assistant(text: String?, id: String?, source: String, key: String): List<ChatEntry> {
         val shown = text?.trim().orEmpty()
-        if (shown.isEmpty() || !said.first("a:$shown")) return emptyList()
+        if (shown.isEmpty() || said.second(id, shown, source)) return emptyList()
         return listOf(ChatEntry.Assistant(key, clipText(shown)))
     }
 
@@ -296,7 +328,7 @@ class CodexTranscriptParser : TranscriptParser {
         "item_completed" -> item(payload["item"].obj() ?: return emptyList(), key)
         // How versions before items wrote the same things.
         "user_message" -> user(payload["message"].str(), key)
-        "agent_message" -> assistant(payload["message"].str(), key)
+        "agent_message" -> assistant(payload["message"].str(), null, "item", key)
         "agent_reasoning" -> payload["text"].str()?.trim()?.takeIf { it.isNotEmpty() }?.let { listOf(ChatEntry.Thinking(key, clipText(it))) }.orEmpty()
         "turn_aborted" -> listOf(ChatEntry.Notice(key, "Interrupted"))
         else -> emptyList()
@@ -306,7 +338,7 @@ class CodexTranscriptParser : TranscriptParser {
         val id = item["id"].str() ?: key
         return when (item["type"].str()) {
             "UserMessage" -> user(contentText(item["content"]), key)
-            "AgentMessage" -> assistant(contentText(item["content"]), key)
+            "AgentMessage" -> assistant(contentText(item["content"]), item["id"].str(), "item", key)
             "Reasoning" -> contentText(item["summary_text"]).trim().takeIf { it.isNotEmpty() }
                 ?.let { listOf(ChatEntry.Thinking(key, clipText(it))) }.orEmpty()
             "CommandExecution" -> {
@@ -345,7 +377,7 @@ class CodexTranscriptParser : TranscriptParser {
 
     private fun response(payload: JsonObject, key: String): List<ChatEntry> = when (payload["type"].str()) {
         // Only the agent's own words. What goes in as the user's turn is mostly context added for the model.
-        "message" -> if (payload["role"].str() == "assistant") assistant(contentText(payload["content"]), key) else emptyList()
+        "message" -> if (payload["role"].str() == "assistant") assistant(contentText(payload["content"]), payload["id"].str(), "response", key) else emptyList()
         "reasoning" -> contentText(payload["summary"]).trim().takeIf { it.isNotEmpty() }
             ?.let { listOf(ChatEntry.Thinking(key, clipText(it))) }.orEmpty()
         "function_call" -> {
@@ -429,6 +461,55 @@ class PiTranscriptParser : TranscriptParser {
     /** Only the text blocks, since an image block has no text of its own. */
     private fun textBlocks(content: JsonElement?): JsonElement =
         JsonArray(content.arr().orEmpty().filter { it.obj()?.get("type").str() == "text" })
+}
+
+private val chatJson = Json { ignoreUnknownKeys = true }
+
+/** A conversation as bytes to keep on the phone, and [decodeChat] to read it back. */
+fun encodeChat(entries: List<ChatEntry>): ByteArray =
+    chatJson.encodeToString(ListSerializer(ChatEntry.serializer()), entries).toByteArray()
+
+fun decodeChat(bytes: ByteArray): List<ChatEntry>? =
+    runCatching { chatJson.decodeFromString(ListSerializer(ChatEntry.serializer()), bytes.toString(Charsets.UTF_8)) }.getOrNull()
+
+/** How much text an entry holds, for keeping a saved conversation within a size. */
+private fun ChatEntry.weight(): Int = 64 + when (this) {
+    is ChatEntry.User -> text.length
+    is ChatEntry.Assistant -> text.length
+    is ChatEntry.Thinking -> text.length
+    is ChatEntry.Tool -> name.length + summary.length + (input?.length ?: 0) + (result?.output?.length ?: 0)
+    is ChatEntry.Notice -> text.length
+    is ResultEntry -> result.output.length
+}
+
+/** The newest entries that fit in [limit] characters, so a very long conversation keeps its end. */
+fun newestWithin(entries: List<ChatEntry>, limit: Int): List<ChatEntry> {
+    var total = 0
+    var from = entries.size
+    while (from > 0) {
+        val next = total + entries[from - 1].weight()
+        if (next > limit && from < entries.size) break
+        total = next
+        from--
+    }
+    return entries.subList(from, entries.size)
+}
+
+/** The words of an entry that a search looks through. */
+fun ChatEntry.searchText(): String = when (this) {
+    is ChatEntry.User -> text
+    is ChatEntry.Assistant -> text
+    is ChatEntry.Thinking -> text
+    is ChatEntry.Tool -> listOfNotNull(name, summary, input, result?.output).joinToString("\n")
+    is ChatEntry.Notice -> text
+    is ResultEntry -> ""
+}
+
+/** Which of [entries] hold [query], by position, ignoring case. None for an empty query. */
+fun chatMatches(entries: List<ChatEntry>, query: String): List<Int> {
+    val wanted = query.trim()
+    if (wanted.isEmpty()) return emptyList()
+    return entries.indices.filter { entries[it].searchText().contains(wanted, ignoreCase = true) }
 }
 
 /** The agents whose conversations Compy can show as a chat. */

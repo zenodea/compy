@@ -1,5 +1,32 @@
 package dev.compy.ui
 
+import kotlinx.coroutines.delay
+import dev.compy.rex.chatMatches
+import dev.compy.rex.RexKey
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.foundation.text.selection.DisableSelection
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.fadeIn
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -105,6 +132,7 @@ fun AgentChat(
 
     var viewing by remember(blockId) { mutableStateOf<ChatImage?>(null) }
     var gallery by rememberSaveable(blockId) { mutableStateOf(false) }
+    var searching by rememberSaveable(blockId) { mutableStateOf(false) }
     val live = state.status == TranscriptFeed.Status.Live || state.status is TranscriptFeed.Status.Failed
     Box(
         modifier
@@ -125,34 +153,179 @@ fun AgentChat(
             }
             TranscriptFeed.Status.Live, is TranscriptFeed.Status.Failed -> {
                 if (s is TranscriptFeed.Status.Failed) Banner(s.message)
-                Conversation(feed, state, { viewing = it }, Modifier.weight(1f))
-                when {
-                    status?.isBlocked == true -> AskingBar(status.message, onShowTerminal)
-                    status?.isWorking == true -> WorkingLine(status.message)
+                ChatBody(
+                    entries = state.entries,
+                    feed = feed,
+                    hasOlder = state.hasOlder,
+                    loadingOlder = state.loadingOlder,
+                    onOpenImage = { viewing = it },
+                    searching = searching,
+                    onCloseSearch = { searching = false },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    when {
+                        status?.isBlocked == true -> AskingBar(status.message, onShowTerminal)
+                        // Escape is what stops Claude Code, Codex and Pi in the middle of their work.
+                        status?.isWorking == true -> WorkingLine(status.message) { controller.sendKey(RexKey("escape"), blockId) }
+                    }
+                    Composer(controller, blockId, feed)
                 }
-                Composer(controller, blockId, feed)
             }
         }
     }
         if (live && gallery) ChatImageGallery(feed, onOpen = { viewing = it }, onClose = { gallery = false }, modifier = Modifier.fillMaxSize())
         // Beside the chat and terminal toggle, which the pane puts in the top-right corner.
         if (live && !gallery) GalleryButton({ gallery = true }, Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 48.dp))
+        if (live && !gallery && !searching) {
+            CornerButton(Icons.Rounded.Search, "Search this conversation", { searching = true }, Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 90.dp))
+        }
     }
     viewing?.let { image -> ChatImageViewer(feed, image) { viewing = null } }
 }
 
+/** A round button in a corner of the chat, like the one that swaps to the terminal. */
+@Composable
+internal fun CornerButton(icon: ImageVector, description: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(onClick = onClick, shape = CircleShape, color = scheme.secondaryContainer.copy(alpha = 0.92f), modifier = modifier.size(36.dp)) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(icon, description, Modifier.size(18.dp), tint = scheme.onSecondaryContainer)
+        }
+    }
+}
+
+/**
+ * A conversation, live or saved: the messages, a button back to the newest one while reading
+ * further up, and a search bar that takes the place of [footer] while it is open. [feed] is the
+ * live conversation's, for reading further back and for its pictures; a saved one has none.
+ */
+@Composable
+internal fun ChatBody(
+    entries: List<ChatEntry>,
+    feed: TranscriptFeed?,
+    hasOlder: Boolean,
+    loadingOlder: Boolean,
+    onOpenImage: (ChatImage) -> Unit,
+    searching: Boolean,
+    onCloseSearch: () -> Unit,
+    modifier: Modifier = Modifier,
+    topPadding: Dp = 52.dp,
+    footer: @Composable ColumnScope.() -> Unit,
+) {
+    val list = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    // Newest first, which is the order the list holds them in.
+    val shown = entries.asReversed()
+    var query by rememberSaveable { mutableStateOf("") }
+    val matches = remember(shown, query, searching) { if (searching) chatMatches(shown, query) else emptyList() }
+    var at by remember { mutableIntStateOf(0) }
+    // A new search starts at the newest match, and a list that changed keeps the place in range.
+    LaunchedEffect(query) { at = 0 }
+    val current = matches.getOrNull(at.coerceIn(0, maxOf(0, matches.size - 1)))
+    LaunchedEffect(current, query) { if (current != null) list.animateScrollToItem(current) }
+    val away by remember(list) { derivedStateOf { list.firstVisibleItemIndex > 2 } }
+    Column(modifier) {
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            Conversation(shown, feed, hasOlder, loadingOlder, list, current?.let { shown.getOrNull(it)?.key }, topPadding, onOpenImage, Modifier.fillMaxSize())
+            androidx.compose.animation.AnimatedVisibility(
+                away && !searching,
+                Modifier.align(Alignment.BottomEnd).padding(10.dp),
+                enter = fadeIn(motion(MOTION_SHORT)) + scaleIn(motion(MOTION_SHORT), initialScale = 0.7f),
+                exit = fadeOut(motion(MOTION_SHORT)) + scaleOut(motion(MOTION_SHORT), targetScale = 0.7f),
+            ) {
+                RoundButton(Icons.Rounded.KeyboardArrowDown, "Go to the newest message", size = 40.dp) {
+                    scope.launch { list.animateScrollToItem(0) }
+                }
+            }
+        }
+        if (searching) {
+            SearchBar(
+                hint = "Search this conversation",
+                query = query,
+                onQuery = { query = it },
+                place = if (matches.isEmpty()) null else at.coerceIn(0, matches.size - 1) + 1,
+                total = matches.size,
+                onOlder = { if (matches.isNotEmpty()) at = (at + 1).coerceAtMost(matches.size - 1) },
+                onNewer = { if (matches.isNotEmpty()) at = (at - 1).coerceAtLeast(0) },
+                onClose = {
+                    query = ""
+                    onCloseSearch()
+                },
+            )
+        } else {
+            footer()
+        }
+    }
+}
+
+/** A search bar with its count of matches. The arrows go to older and newer ones. */
+@Composable
+internal fun SearchBar(
+    hint: String,
+    query: String,
+    onQuery: (String) -> Unit,
+    place: Int?,
+    total: Int,
+    onOlder: () -> Unit,
+    onNewer: () -> Unit,
+    onClose: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    BackHandler(onBack = onClose)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(8.dp)
+            .height(48.dp)
+            .clip(CircleShape)
+            .background(scheme.surfaceContainerHigh)
+            .padding(start = 14.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Rounded.Search, null, Modifier.size(18.dp), tint = scheme.primary)
+        Box(Modifier.padding(start = 10.dp).weight(1f), contentAlignment = Alignment.CenterStart) {
+            if (query.isEmpty()) Text(hint, style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant)
+            BasicTextField(
+                query, onQuery,
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyMedium.copy(color = scheme.onSurface),
+                cursorBrush = SolidColor(scheme.primary),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { onOlder() }),
+                modifier = Modifier.fillMaxWidth().focusRequester(focus),
+            )
+        }
+        if (query.isNotBlank()) {
+            Text(
+                if (place == null) "None" else "$place/$total",
+                Modifier.padding(horizontal = 8.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = scheme.onSurfaceVariant,
+            )
+        }
+        RoundButton(Icons.Rounded.KeyboardArrowUp, "Older match", size = 36.dp, filled = false, onClick = onOlder)
+        RoundButton(Icons.Rounded.KeyboardArrowDown, "Newer match", size = 36.dp, filled = false, onClick = onNewer)
+        RoundButton(Icons.Rounded.Close, "Close search", size = 36.dp, filled = false, tint = scheme.onSurfaceVariant, onClick = onClose)
+    }
+}
+
 @Composable
 private fun Conversation(
-    feed: TranscriptFeed,
-    state: TranscriptFeed.State,
+    entries: List<ChatEntry>,
+    feed: TranscriptFeed?,
+    hasOlder: Boolean,
+    loadingOlder: Boolean,
+    list: LazyListState,
+    current: String?,
+    topPadding: Dp,
     onOpenImage: (ChatImage) -> Unit,
     modifier: Modifier,
 ) {
-    val list = rememberLazyListState()
-    val entries = state.entries.asReversed()
     // Near the top (the end of a reversed list): read further back.
-    LaunchedEffect(list, state.hasOlder) {
-        if (!state.hasOlder) return@LaunchedEffect
+    LaunchedEffect(list, hasOlder, feed) {
+        if (!hasOlder || feed == null) return@LaunchedEffect
         snapshotFlow { list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
             .distinctUntilChanged()
             .collect { last ->
@@ -183,25 +356,78 @@ private fun Conversation(
         }
         return
     }
+    val scheme = MaterialTheme.colorScheme
     SelectionContainer(modifier) {
         LazyColumn(
             state = list,
             reverseLayout = true,
-            // Room at the top for the button that swaps back to the terminal.
-            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 52.dp, bottom = 10.dp),
+            // Room at the top for the buttons in the pane's corner.
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = topPadding, bottom = 10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.fillMaxSize(),
         ) {
-            items(entries, key = { it.key }) { entry -> Entry(feed, entry, onOpenImage) }
-            if (state.loadingOlder) {
+            items(entries, key = { it.key }) { entry ->
+                // The match a search is on has a line around it.
+                val found = entry.key == current
+                Box(
+                    if (found) {
+                        Modifier.clip(RoundedCornerShape(12.dp)).background(scheme.primary.copy(alpha = 0.12f)).padding(4.dp)
+                    } else {
+                        Modifier
+                    },
+                ) { Entry(feed, entry, onOpenImage) }
+            }
+            if (loadingOlder) {
                 item(key = "older") { Centered { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) } }
             }
         }
     }
 }
 
+/** Pictures aren't kept with a saved conversation, which says so where they were. */
 @Composable
-private fun Entry(feed: TranscriptFeed, entry: ChatEntry, onOpenImage: (ChatImage) -> Unit) {
+private fun PicturesNote(count: Int, modifier: Modifier = Modifier) {
+    Text(
+        if (count == 1) "1 picture, not saved" else "$count pictures, not saved",
+        modifier,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+/** A small button that copies [text], for a message, a block of code or a tool's output. */
+@Composable
+internal fun CopyButton(text: String, modifier: Modifier = Modifier) {
+    val clipboard = LocalClipboardManager.current
+    val scheme = MaterialTheme.colorScheme
+    var copied by remember { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(1200)
+            copied = false
+        }
+    }
+    Box(
+        modifier
+            .size(28.dp)
+            .clip(CircleShape)
+            .clickable {
+                clipboard.setText(AnnotatedString(text))
+                copied = true
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+            if (copied) "Copied" else "Copy",
+            Modifier.size(14.dp),
+            tint = if (copied) scheme.primary else scheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun Entry(feed: TranscriptFeed?, entry: ChatEntry, onOpenImage: (ChatImage) -> Unit) {
     val scheme = MaterialTheme.colorScheme
     when (entry) {
         is ChatEntry.User -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
@@ -214,16 +440,24 @@ private fun Entry(feed: TranscriptFeed, entry: ChatEntry, onOpenImage: (ChatImag
                     if (entry.text.isNotEmpty()) {
                         Text(entry.text, style = MaterialTheme.typography.bodyMedium, color = scheme.onPrimaryContainer)
                     }
-                    if (entry.images.isNotEmpty()) ChatImageRow(feed, entry.images, onOpenImage)
+                    if (entry.images.isNotEmpty()) {
+                        if (feed != null) ChatImageRow(feed, entry.images, onOpenImage) else PicturesNote(entry.images.size)
+                    }
                 }
             }
         }
-        is ChatEntry.Assistant -> MarkdownText(entry.text, scheme.onSurface, Modifier.fillMaxWidth().padding(end = 8.dp))
+        is ChatEntry.Assistant -> Column {
+            MarkdownText(entry.text, scheme.onSurface, Modifier.fillMaxWidth().padding(end = 8.dp))
+            // Not part of what a finger selects, or it would be picked up with the message's text.
+            DisableSelection { CopyButton(entry.text, Modifier.padding(top = 2.dp)) }
+        }
         is ChatEntry.Thinking -> Expandable(Icons.Rounded.Psychology, "Thinking", null, entry.text, mono = false)
         is ChatEntry.Tool -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             ToolRow(entry)
             // What the agent looked at, shown without opening the row.
-            entry.result?.images?.takeIf { it.isNotEmpty() }?.let { ChatImageRow(feed, it, onOpenImage, Modifier.padding(start = 28.dp)) }
+            entry.result?.images?.takeIf { it.isNotEmpty() }?.let {
+                if (feed != null) ChatImageRow(feed, it, onOpenImage, Modifier.padding(start = 28.dp)) else PicturesNote(it.size, Modifier.padding(start = 28.dp))
+            }
         }
         is ChatEntry.Notice -> Text(
             entry.text,
@@ -288,6 +522,7 @@ private fun Expandable(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            if (open && detail != null) DisableSelection { CopyButton(detail, Modifier.size(22.dp)) }
             if (mark != null) Icon(mark, null, Modifier.size(14.dp), tint = if (failed) scheme.error else scheme.onSurfaceVariant)
         }
         if (open && detail != null) {
@@ -382,20 +617,26 @@ private fun AskingBar(message: String?, onShowTerminal: () -> Unit) {
 }
 
 @Composable
-private fun WorkingLine(message: String?) {
+private fun WorkingLine(message: String?, onStop: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
         Text(
             message?.takeIf { it.isNotBlank() } ?: "Working…",
+            Modifier.weight(1f),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+        // Stops the agent where it is, as pressing Escape in its terminal does.
+        TextButton(onClick = onStop, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp), modifier = Modifier.height(32.dp)) {
+            Icon(Icons.Rounded.Stop, null, Modifier.size(16.dp))
+            Text("Stop", Modifier.padding(start = 4.dp), style = MaterialTheme.typography.labelMedium)
+        }
     }
 }
 

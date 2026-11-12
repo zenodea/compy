@@ -20,6 +20,12 @@ class GhosttyTerminal private constructor(private var handle: Long) {
         if (handle != 0L) nativeResize(handle, cols, rows, cellW, cellH)
     }
 
+    /**
+     * The whole terminal, history and all, as bytes [fromSnapshot] reads back. Null when it can't
+     * be taken just now, which is the case in the middle of an escape sequence.
+     */
+    fun snapshot(): ByteArray? = synchronized(lock) { if (handle != 0L) nativeSnapshot(handle) else null }
+
     fun scroll(delta: Int) = synchronized(lock) { if (handle != 0L) nativeScroll(handle, delta) }
     fun scrollToBottom() = synchronized(lock) { if (handle != 0L) nativeScrollToBottom(handle) }
 
@@ -188,6 +194,7 @@ class GhosttyTerminal private constructor(private var handle: Long) {
 
         @JvmStatic private external fun nativeNew(cols: Int, rows: Int): Long
         @JvmStatic private external fun nativeDecodeSnapshot(data: ByteArray, len: Int): Long
+        @JvmStatic private external fun nativeSnapshot(h: Long): ByteArray?
         @JvmStatic private external fun nativeFree(h: Long)
         @JvmStatic private external fun nativeWrite(h: Long, data: ByteArray, off: Int, len: Int)
         @JvmStatic private external fun nativeResize(h: Long, cols: Int, rows: Int, cw: Int, ch: Int)

@@ -141,6 +141,17 @@ class TranscriptFeed(
         }
     }
 
+    /**
+     * Reads the newest lines and then back towards the start, for saving the conversation whole.
+     * It stops at the start, at the most entries a feed keeps, or after [maxReads] reads.
+     */
+    suspend fun readAll(maxReads: Int = 60): State {
+        poll()
+        var reads = 0
+        while (_state.value.status == Status.Live && _state.value.hasOlder && reads++ < maxReads) loadOlder()
+        return _state.value
+    }
+
     private fun reset() {
         session = null
         start = 0

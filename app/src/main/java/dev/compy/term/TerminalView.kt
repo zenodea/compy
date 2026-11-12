@@ -25,6 +25,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.OverScroller
 import dev.compy.rex.RexKey
 import dev.compy.rex.TerminalSession
+import dev.compy.rex.TerminalSource
 import dev.compy.term.GhosttyTerminal.Companion.FLAG_BOLD
 import dev.compy.term.GhosttyTerminal.Companion.FLAG_FAINT
 import dev.compy.term.GhosttyTerminal.Companion.FLAG_INVERSE
@@ -81,6 +82,12 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             // Sizes aren't reported while this is off, so one that changed meanwhile was missed.
             if (value && !was) reportGrid()
         }
+    /**
+     * True for a saved pane, which can be scrolled, searched and copied from but has nothing to
+     * type into: no keyboard comes up, and scrolling always moves through its own history.
+     */
+    var readOnly = false
+
     /** Whether this pane receives typing, which decides how its cursor looks. */
     var paneFocused = false
         set(value) {
@@ -90,7 +97,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             }
         }
 
-    private var session: TerminalSession? = null
+    private var session: TerminalSource? = null
     private var boundTerminal: GhosttyTerminal? = null
 
     private val density = resources.displayMetrics.density
@@ -254,7 +261,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         interactive = true
     }
 
-    fun bind(newSession: TerminalSession?) {
+    fun bind(newSession: TerminalSource?) {
         if (session === newSession) return
         session?.removeListener(this)
         session = newSession
@@ -520,6 +527,9 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
 
     /** Whether the cursor blinks: the person allows it, the program asks for it and this pane has the keyboard. */
     private val blinks get() = look.cursorBlink && meta[GhosttyTerminal.META_CURSOR_BLINK] != 0 && paneFocused
+
+    /** The whole terminal as bytes that can be kept and read back, or null when it can't be taken just now. */
+    fun snapshot(): ByteArray? = session?.terminal?.snapshot()
 
     /** The pane as a picture, as it looks now, for sharing. Null before it has a size. */
     fun picture(): android.graphics.Bitmap? {
@@ -989,7 +999,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     }
 
     private fun drawCursor(canvas: Canvas, cols: Int, rows: Int, defaultFg: Int, defaultBg: Int) {
-        if (!interactive || meta[GhosttyTerminal.META_CURSOR_VISIBLE] == 0) return
+        if (!interactive || readOnly || meta[GhosttyTerminal.META_CURSOR_VISIBLE] == 0) return
         val x = meta[GhosttyTerminal.META_CURSOR_X]
         val y = meta[GhosttyTerminal.META_CURSOR_Y]
         if (x !in 0 until cols || y !in 0 until rows) return
@@ -1115,7 +1125,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
 
     // Input method.
 
-    override fun onCheckIsTextEditor() = interactive
+    override fun onCheckIsTextEditor() = interactive && !readOnly
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
         // Visible-password mode keeps keyboards from autocorrecting and composing what's typed.
@@ -1127,7 +1137,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     }
 
     fun showKeyboard() {
-        if (!interactive) return
+        if (!interactive || readOnly) return
         requestFocus()
         val imm = context.getSystemService(InputMethodManager::class.java)
         imm.restartInput(this)
@@ -1211,7 +1221,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         val h = host ?: return super.onKeyDown(keyCode, event)
-        if (!interactive) return super.onKeyDown(keyCode, event)
+        if (!interactive || readOnly) return super.onKeyDown(keyCode, event)
         val key = KeyMapper.fromEvent(event, 0, if (event.repeatCount > 0) "repeat" else "press")
             ?: return super.onKeyDown(keyCode, event)
         if (isModifierOnly(keyCode)) {
@@ -1226,7 +1236,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
         val h = host ?: return super.onKeyUp(keyCode, event)
-        if (!interactive) return super.onKeyUp(keyCode, event)
+        if (!interactive || readOnly) return super.onKeyUp(keyCode, event)
         val key = KeyMapper.fromEvent(event, 0, "release") ?: return super.onKeyUp(keyCode, event)
         h.sendKey(key)
         return true
@@ -1246,7 +1256,11 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     private fun cellY(py: Float): Int =
         floor(((py - originY) / drawScale - scrollFrac) / cellH).toInt().coerceIn(0, max(0, meta[GhosttyTerminal.META_ROWS] - 1))
 
-    private val appOwnsScroll get() = meta[GhosttyTerminal.META_MOUSE] != 0 || meta[GhosttyTerminal.META_ALT] != 0
+    /** Whether a program in the pane asked for taps and clicks. A saved pane has no program to send them to. */
+    private val wantsMouse get() = !readOnly && meta[GhosttyTerminal.META_MOUSE] != 0
+
+    // A saved pane has no program left to scroll for it.
+    private val appOwnsScroll get() = !readOnly && (meta[GhosttyTerminal.META_MOUSE] != 0 || meta[GhosttyTerminal.META_ALT] != 0)
 
     /**
      * Scrolls by [dy] pixels, positive towards newer lines. False when there was nowhere to go,
@@ -1302,7 +1316,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             }
             val col = cellX(e.x)
             val row = cellY(e.y)
-            if (meta[GhosttyTerminal.META_MOUSE] == 0) {
+            if (!wantsMouse) {
                 val url = linkAt(col, row)
                 if (url != null) {
                     host?.openUrl(url)
@@ -1312,7 +1326,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             // Read before the tap is passed on, which may be what brings the keyboard up.
             val typingHere = paneFocused && keyboardShown()
             host?.onTapped()
-            if (meta[GhosttyTerminal.META_MOUSE] != 0) {
+            if (wantsMouse) {
                 host?.sendMouse("press", "left", col, row)
                 host?.sendMouse("release", "left", col, row)
             } else if (typingHere) {
@@ -1351,7 +1365,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
 
         /** A second tap selects the word under it. A program that takes the mouse gets the taps itself. */
         override fun onDoubleTap(e: MotionEvent): Boolean {
-            if (scaling || meta[GhosttyTerminal.META_MOUSE] != 0) return false
+            if (scaling || wantsMouse) return false
             performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
             startSelection(cellX(e.x), cellY(e.y))
             doubleTapAt = SystemClock.uptimeMillis()
@@ -1456,7 +1470,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (!interactive) return false
         // Mice and trackpads report real buttons; pass those to programs that want them.
-        if (event.isFromSource(android.view.InputDevice.SOURCE_MOUSE) && meta[GhosttyTerminal.META_MOUSE] != 0) {
+        if (event.isFromSource(android.view.InputDevice.SOURCE_MOUSE) && wantsMouse) {
             return handleRealMouse(event)
         }
         parent?.requestDisallowInterceptTouchEvent(true)

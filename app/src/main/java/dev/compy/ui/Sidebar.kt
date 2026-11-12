@@ -45,6 +45,7 @@ import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.ViewSidebar
+import androidx.compose.material.icons.rounded.Bookmarks
 import androidx.compose.material.icons.rounded.ViewKanban
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material3.AlertDialog
@@ -118,11 +119,13 @@ fun Sidebar(
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit,
     onOpenBoard: () -> Unit,
+    onOpenSaved: () -> Unit,
     onAddServer: () -> Unit,
     onOpened: () -> Unit,
     onMessage: (String) -> Unit,
     onHideSidebar: (() -> Unit)? = null,
 ) {
+    val savedPanes by app.saved.list.collectAsState()
     val settings by app.settings.collectAsStateWithLifecycle()
     val connections by app.connections.collectAsStateWithLifecycle()
     val selection by app.selection.collectAsStateWithLifecycle()
@@ -235,6 +238,29 @@ fun Sidebar(
                         Box(Modifier.animateItem()) {
                             ServerSection(connection, selection, query, settings.collapsedSessions, app, onOpened, onMessage)
                         }
+                    }
+                }
+            }
+            // Reachable with no server connected, since reading offline is what they are for.
+            if (savedPanes.isNotEmpty()) {
+                item(key = "saved-panes") {
+                    Row(
+                        Modifier
+                            .animateItem()
+                            .padding(horizontal = 8.dp)
+                            .padding(top = 10.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable(onClick = onOpenSaved)
+                            .padding(horizontal = 8.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Rounded.Bookmarks, null, Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
+                        Text(
+                            if (savedPanes.size == 1) "1 saved pane" else "${savedPanes.size} saved panes",
+                            Modifier.padding(start = 8.dp),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = scheme.onSurfaceVariant,
+                        )
                     }
                 }
             }

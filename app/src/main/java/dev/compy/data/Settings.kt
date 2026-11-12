@@ -99,6 +99,32 @@ data class Settings(
     val lastSessionId: String? = null,
 )
 
+/** The most entries kept of anything remembered per pane, session or server. */
+const val MAX_REMEMBERED = 200
+
+private fun <K, V> Map<K, V>.newest(limit: Int): Map<K, V> = if (size <= limit) this else entries.drop(size - limit).associate { it.toPair() }
+private fun <T> Set<T>.newest(limit: Int): Set<T> = if (size <= limit) this else drop(size - limit).toSet()
+
+/**
+ * These settings with everything that is remembered per pane, session or server kept to the
+ * newest few. Panes and sessions come and go for as long as the app is used, and what was
+ * remembered about the ones long gone would otherwise stay in the settings file for good.
+ */
+fun Settings.bounded(): Settings {
+    val over = sizeModes.size > MAX_REMEMBERED || collapsedSessions.size > MAX_REMEMBERED || paneFontSizes.size > MAX_REMEMBERED ||
+        chatPanes.size > MAX_REMEMBERED || hostThemes.size > MAX_REMEMBERED || composerHistory.size > 30 || snippets.size > 50
+    if (!over) return this
+    return copy(
+        sizeModes = sizeModes.newest(MAX_REMEMBERED),
+        collapsedSessions = collapsedSessions.newest(MAX_REMEMBERED),
+        paneFontSizes = paneFontSizes.newest(MAX_REMEMBERED),
+        chatPanes = chatPanes.newest(MAX_REMEMBERED),
+        hostThemes = hostThemes.newest(MAX_REMEMBERED),
+        composerHistory = composerHistory.take(30),
+        snippets = snippets.take(50),
+    )
+}
+
 object DefaultKeyBar {
     val catalog: List<KeyDef> = listOf(
         KeyDef("key", "esc", key = "escape"),
@@ -200,7 +226,7 @@ class SettingsStore(private val context: Context) {
     }
 
     suspend fun updateSettings(change: (Settings) -> Settings) {
-        context.store.edit { prefs -> prefs.change(settingsKey, Settings(), change) }
+        context.store.edit { prefs -> prefs.change(settingsKey, Settings()) { change(it).bounded() } }
     }
 
     private inline fun <reified T> decode(text: String?): T? = text?.let { runCatching { json.decodeFromString<T>(it) }.getOrNull() }

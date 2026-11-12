@@ -153,6 +153,19 @@ JNIEXPORT jlong JNICALL Java_dev_compy_term_GhosttyTerminal_nativeDecodeSnapshot
   return (jlong)(intptr_t)wrap(t);
 }
 
+// The whole terminal, history and all, as bytes that nativeDecodeSnapshot reads back. Null when
+// it can't be taken just now, such as in the middle of an escape sequence.
+JNIEXPORT jbyteArray JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSnapshot(
+    JNIEnv* env, jclass cls, jlong handle) {
+  Term* h = (Term*)(intptr_t)handle;
+  uint8_t* out = NULL;
+  size_t len = 0;
+  if (ghostty_snapshot_encode_alloc(h->term, NULL, &out, &len) != GHOSTTY_SUCCESS || !out) return NULL;
+  jbyteArray bytes = len <= 0x7FFFFFFF ? to_bytes(env, out, len) : NULL;
+  ghostty_free(NULL, out, len);
+  return bytes;
+}
+
 JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeFree(
     JNIEnv* env, jclass cls, jlong handle) {
   destroy((Term*)(intptr_t)handle);

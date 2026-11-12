@@ -1259,7 +1259,7 @@ fun TerminalPreview(controller: WorkspaceController, blockId: String, modifier: 
 }
 
 /** The terminal options from Settings, as the terminal view takes them. */
-private fun dev.compy.data.Settings.terminalLook() = TerminalLook(
+internal fun dev.compy.data.Settings.terminalLook() = TerminalLook(
     lineHeight = lineHeight,
     letterSpacing = letterSpacing,
     cursorStyle = cursorStyle,

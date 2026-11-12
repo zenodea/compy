@@ -164,6 +164,7 @@ fun CommandPalette(
         }
         add("Compose a message", "composer voice long", onCompose)
         focused?.let { block ->
+            add("Save this pane to read offline", "history keep archive download export later") { controller.savePane(block) }
             add("Share a picture of this pane", "screenshot image send export") { controller.sharePicture(block) }
             if (block in controller.app.settings.value.paneFontSizes) {
                 add("Reset this pane's text size", "font zoom pinch") { controller.resetFontSize(block) }

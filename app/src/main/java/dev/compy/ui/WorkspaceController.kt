@@ -23,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -172,6 +173,56 @@ class WorkspaceController(
 
     fun copy(text: String) {
         context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Terminal", text))
+    }
+
+    /**
+     * Keeps a pane on the phone to read offline: an agent's conversation when it can be read,
+     * which opens as a chat, and otherwise the pane's screen and history, which opens as a terminal.
+     */
+    fun savePane(blockId: String) {
+        val status = connection.statuses.value[blockId]
+        val process = connection.programs.value[blockId]
+        val title = BoardRules.title(status, process, connection.titles.value[blockId])
+        val session = connection.sessions.value.firstOrNull { it.id == sessionId }?.label
+        val where = listOfNotNull(connection.label.value.ifEmpty { null }, session?.ifEmpty { null }, connection.folderPaths.value[blockId]).joinToString(" · ")
+        val agent = ProgramNames.candidates(status?.app, process).any { it in CHAT_AGENTS }
+        app.scope.launch(Dispatchers.Main) {
+            var saved: dev.compy.data.SavedPane? = null
+            var tooLarge = false
+            if (agent) {
+                val chat = runCatching { feed(blockId).readAll() }.getOrNull()
+                if (chat != null && chat.status == TranscriptFeed.Status.Live && chat.entries.isNotEmpty()) {
+                    saved = withContext(Dispatchers.IO) {
+                        app.saved.save(title, where, dev.compy.data.SavedPane.CHAT, dev.compy.rex.encodeChat(dev.compy.rex.newestWithin(chat.entries, MAX_SAVED_CHAT)))
+                    }
+                    tooLarge = saved == null
+                }
+            }
+            if (saved == null && !tooLarge) {
+                // The engine can't be copied in the middle of an escape sequence, which passes in a moment.
+                var bytes: ByteArray? = null
+                repeat(4) {
+                    if (bytes == null) {
+                        bytes = withContext(Dispatchers.Default) { views[blockId]?.snapshot() }
+                        if (bytes == null) delay(150)
+                    }
+                }
+                val snapshot = bytes
+                if (snapshot == null) {
+                    showMessage("This pane couldn't be saved just now. Try again in a moment.")
+                    return@launch
+                }
+                saved = withContext(Dispatchers.IO) { app.saved.save(title, where, dev.compy.data.SavedPane.TERMINAL, snapshot) }
+                tooLarge = saved == null
+            }
+            showMessage(
+                when {
+                    saved == null -> "This pane is too large to keep on the phone"
+                    saved.kind == dev.compy.data.SavedPane.CHAT -> "Saved the conversation. It is under Saved panes in the session list."
+                    else -> "Saved the terminal. It is under Saved panes in the session list."
+                },
+            )
+        }
     }
 
     /** Gives a pane back the text size from Settings. */
@@ -359,6 +410,8 @@ class WorkspaceController(
     companion object {
         private const val MAX_TYPED = 64
         private const val MAX_PANE_SIZES = 100
+        /** The most text of a conversation that is kept, about 12 MB before it is compressed. */
+        private const val MAX_SAVED_CHAT = 12_000_000
         private const val SIZE_DEBOUNCE_MS = 200L
 
         fun mousePayload(action: String, button: String?, col: Int, row: Int): JsonObject = buildJsonObject {
