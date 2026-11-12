@@ -28,16 +28,24 @@ class GhosttyTerminal private constructor(private var handle: Long) {
         if (handle != 0L) nativeSetColors(handle, fg, bg, cursor, palette)
     }
 
-    /** Copies the current screen into [meta], [cells] and [extras]. False when unchanged. */
-    fun render(force: Boolean): Boolean = synchronized(lock) {
+    /** Counts the frames copied out, so each view of this terminal can tell when it has an old one. */
+    var frame = 0L
+        private set
+
+    /**
+     * Copies the current screen into [meta], [cells] and [extras]. False when unchanged. [above] is
+     * how many lines above the screen to copy too; they follow the screen's rows, nearest first.
+     */
+    fun render(force: Boolean, above: Int = 1): Boolean = synchronized(lock) {
         if (handle == 0L) return false
-        val first = nativeRender(handle, meta, cells, extras, force)
-        val needed = meta[META_COLS] * meta[META_ROWS] * 4
-        if (first && needed > cells.size) {
+        var updated = nativeRender(handle, meta, cells, extras, force, above)
+        val needed = cellsNeeded(meta[META_COLS], meta[META_ROWS], above)
+        if (updated && needed > cells.size) {
             cells = IntArray(needed)
-            return nativeRender(handle, meta, cells, extras, true)
+            updated = nativeRender(handle, meta, cells, extras, true, above)
         }
-        first
+        if (updated) frame++
+        updated
     }
 
     fun selectRange(x1: Int, y1: Int, x2: Int, y2: Int) = synchronized(lock) {
@@ -61,7 +69,7 @@ class GhosttyTerminal private constructor(private var handle: Long) {
      */
     fun selectLastOutput(): Boolean = synchronized(lock) {
         if (handle == 0L) return false
-        nativeRender(handle, meta, cells, extras, true)
+        render(true)
         for (y in meta[META_ROWS] - 1 downTo 0) {
             if (nativeSelectOutputAt(handle, 0, y)) return true
         }
@@ -97,7 +105,12 @@ class GhosttyTerminal private constructor(private var handle: Long) {
         const val META_BRACKETED = 14
         const val META_CURSOR_BLINK = 15
         const val META_EXTRAS_LEN = 16
-        const val META_COUNT = 17
+        /** How many lines above the screen follow the screen's own rows. */
+        const val META_ABOVE = 17
+        const val META_COUNT = 18
+
+        /** How many ints a frame of this size takes: four per cell, with [above] rows past the screen's. */
+        fun cellsNeeded(cols: Int, rows: Int, above: Int) = cols * (rows + above) * 4
 
         const val FLAG_BOLD = 1
         const val FLAG_ITALIC = 2
@@ -112,6 +125,10 @@ class GhosttyTerminal private constructor(private var handle: Long) {
         const val FLAG_WIDE = 1024
         const val FLAG_SPACER = 2048
         const val FLAG_LINK = 4096
+
+        /** The underline's kind, above the flags: 1 single, 2 double, 3 curly, 4 dotted, 5 dashed. */
+        const val UNDERLINE_SHIFT = 13
+        const val UNDERLINE_MASK = 7 shl UNDERLINE_SHIFT
 
         init {
             System.loadLibrary("compyterm")
@@ -133,7 +150,7 @@ class GhosttyTerminal private constructor(private var handle: Long) {
         @JvmStatic private external fun nativeScroll(h: Long, delta: Int)
         @JvmStatic private external fun nativeScrollToBottom(h: Long)
         @JvmStatic private external fun nativeSetColors(h: Long, fg: Int, bg: Int, cursor: Int, palette: IntArray?)
-        @JvmStatic private external fun nativeRender(h: Long, meta: IntArray, cells: IntArray, extras: IntArray, force: Boolean): Boolean
+        @JvmStatic private external fun nativeRender(h: Long, meta: IntArray, cells: IntArray, extras: IntArray, force: Boolean, above: Int): Boolean
         @JvmStatic private external fun nativeSelectRange(h: Long, x1: Int, y1: Int, x2: Int, y2: Int): Boolean
         @JvmStatic private external fun nativeSelectWord(h: Long, x: Int, y: Int): Boolean
         @JvmStatic private external fun nativeClearSelection(h: Long)

@@ -12,17 +12,22 @@ typedef struct {
   GhosttyRenderStateRowIterator rows;
   GhosttyRenderStateRowCells cells;
   GhosttySearch search;
+  /* Rows asked for above the screen. */
+  int above;
 } Term;
 
 enum {
   META_COLS, META_ROWS, META_BG, META_FG, META_CURSOR_COLOR, META_CURSOR_VISIBLE, META_CURSOR_X,
   META_CURSOR_Y, META_CURSOR_STYLE, META_SCROLL_TOTAL, META_SCROLL_OFFSET, META_SCROLL_LEN,
-  META_MOUSE, META_ALT, META_BRACKETED, META_CURSOR_BLINK, META_EXTRAS_LEN, META_COUNT
+  META_MOUSE, META_ALT, META_BRACKETED, META_CURSOR_BLINK, META_EXTRAS_LEN, META_ABOVE, META_COUNT
 };
 
 enum { FLAG_BOLD = 1, FLAG_ITALIC = 2, FLAG_FAINT = 4, FLAG_INVERSE = 8, FLAG_INVISIBLE = 16,
        FLAG_STRIKE = 32, FLAG_UNDERLINE = 64, FLAG_OVERLINE = 128, FLAG_BLINK = 256,
        FLAG_SELECTED = 512, FLAG_WIDE = 1024, FLAG_SPACER = 2048, FLAG_LINK = 4096 };
+
+/* The underline's kind sits above the flags: 1 single, 2 double, 3 curly, 4 dotted, 5 dashed. */
+#define UNDERLINE_SHIFT 13
 
 static inline jint rgb(GhosttyColorRgb c) {
   return (jint)(0xFF000000u | ((uint32_t)c.r << 16) | ((uint32_t)c.g << 8) | c.b);
@@ -161,10 +166,21 @@ JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSetColors(
 // Fills the frame arrays. Returns false when nothing changed since the last call.
 // cells holds 4 ints per cell: codepoint (or -(index+1) into extras), fg, bg, flags.
 // A colour of 0 means "use the terminal default".
+// The screen's rows are followed by up to `above` rows of the lines just above the screen, nearest
+// first, for a view scrolled part of a row into history or one taller than its terminal. META_ABOVE
+// says how many there were.
 JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeRender(
     JNIEnv* env, jclass cls, jlong handle, jintArray metaArr, jintArray cellsArr, jintArray extrasArr,
-    jboolean force) {
+    jboolean force, jint above) {
   Term* h = (Term*)(intptr_t)handle;
+  if (above < 0) above = 0;
+  if (above > 512) above = 512;
+  if (above != h->above) {
+    h->above = above;
+    const GhosttyRenderStateOverscan overscan = { .above = (uint16_t)above, .below = 0 };
+    ghostty_render_state_set(h->rs, GHOSTTY_RENDER_STATE_OPTION_OVERSCAN, &overscan);
+    force = JNI_TRUE;
+  }
   if (ghostty_render_state_update(h->rs, h->term) != GHOSTTY_SUCCESS) return JNI_FALSE;
   GhosttyRenderStateDirty dirty = GHOSTTY_RENDER_STATE_DIRTY_FALSE;
   ghostty_render_state_get(h->rs, GHOSTTY_RENDER_STATE_DATA_DIRTY, &dirty);
@@ -211,7 +227,7 @@ JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeRender(
 
   jsize cap = (*env)->GetArrayLength(env, cellsArr);
   jsize extrasCap = (*env)->GetArrayLength(env, extrasArr);
-  jsize needed = (jsize)cols * rows * 4;
+  jsize needed = (jsize)cols * (rows + above) * 4;
   jint extrasLen = 0;
   if (needed <= cap) {
     jint* out = (*env)->GetPrimitiveArrayCritical(env, cellsArr, NULL);
@@ -224,8 +240,15 @@ JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeRender(
     /* Cells the iterators don't reach would otherwise keep what the last frame drew there. */
     memset(out, 0, (size_t)needed * sizeof(jint));
     ghostty_render_state_get(h->rs, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &h->rows);
-    int y = 0;
-    while (y < rows && ghostty_render_state_row_iterator_next(h->rows)) {
+    while (ghostty_render_state_row_iterator_next(h->rows)) {
+      int32_t at = 0;
+      if (ghostty_render_state_row_get(h->rows, GHOSTTY_RENDER_STATE_ROW_DATA_VIEWPORT_Y, &at) != GHOSTTY_SUCCESS) continue;
+      if (at < -above || at >= rows) continue;
+      int y = at;
+      if (at < 0) {
+        y = rows - 1 - at;
+        if (-at > meta[META_ABOVE]) meta[META_ABOVE] = -at;
+      }
       GhosttyRenderStateRowSelection sel = GHOSTTY_INIT_SIZED(GhosttyRenderStateRowSelection);
       bool hasSel = ghostty_render_state_row_get(h->rows, GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION, &sel) == GHOSTTY_SUCCESS;
       ghostty_render_state_row_get(h->rows, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, &h->cells);
@@ -270,7 +293,8 @@ JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeRender(
           if (style.flags & GHOSTTY_STYLE_FLAG_STRIKETHROUGH) flags |= FLAG_STRIKE;
           if (style.flags & GHOSTTY_STYLE_FLAG_OVERLINE) flags |= FLAG_OVERLINE;
           if (style.flags & GHOSTTY_STYLE_FLAG_BLINK) flags |= FLAG_BLINK;
-          if (GHOSTTY_STYLE_UNDERLINE(style) != 0) flags |= FLAG_UNDERLINE;
+          int underline = GHOSTTY_STYLE_UNDERLINE(style);
+          if (underline != 0) flags |= FLAG_UNDERLINE | ((underline & 7) << UNDERLINE_SHIFT);
         }
         GhosttyCell raw = 0;
         if (ghostty_render_state_row_cells_get(h->cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &raw) == GHOSTTY_SUCCESS) {
@@ -286,7 +310,6 @@ JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeRender(
         c[0] = cp; c[1] = fg; c[2] = bg; c[3] = flags;
         x++;
       }
-      y++;
     }
     (*env)->ReleasePrimitiveArrayCritical(env, extrasArr, extras, 0);
     (*env)->ReleasePrimitiveArrayCritical(env, cellsArr, out, 0);

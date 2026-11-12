@@ -355,6 +355,9 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
                             TextButton(onClick = { fontPicker.launch(arrayOf("font/*", "application/x-font-ttf", "application/octet-stream")) }) { Text("Import") }
                         }
                     }
+                    SwitchRow("Readable text colors", "Lighten or darken text that is too close to its background", settings.improveContrast) { on ->
+                        update { it.copy(improveContrast = on) }
+                    }
                     Row2("Key bar", "Reorder keys, add your own and arrange pages", onClick = onEditKeyBar)
                 }
             }

@@ -56,6 +56,8 @@ data class Settings(
     val terminalTheme: String = "rex",
     val fontSizeSp: Float = 13f,
     val customFontPath: String? = null,
+    /** Moves text colors that are too close to their background until they can be read. */
+    val improveContrast: Boolean = true,
     val biometricLock: Boolean = true,
     val blockScreenshots: Boolean = false,
     val keyBarPages: List<List<KeyDef>> = DefaultKeyBar.pages,

@@ -1120,6 +1120,7 @@ fun TerminalPane(
                 view.keepSize = settings.sizeModes[controller.sessionId] == SizeMode.Keep
                 view.paneFocused = focused && interactive && !chat
                 view.fontSizeSp = settings.fontSizeSp
+                view.improveContrast = settings.improveContrast
                 view.tag.let { if (it !== fonts) { view.tag = fonts; view.fontsChanged() } }
             },
             onRelease = { view ->
@@ -1213,6 +1214,7 @@ fun TerminalPreview(controller: WorkspaceController, blockId: String, modifier: 
     val app = controller.app
     val session = rememberTerminal(controller, blockId)
     val fonts by app.fonts.collectAsStateWithLifecycle()
+    val settings by app.settings.collectAsStateWithLifecycle()
     // A preview may be the only thing showing its terminal, such as a detached pane's.
     TerminalTheme(app, session)
     AndroidView(
@@ -1223,7 +1225,10 @@ fun TerminalPreview(controller: WorkspaceController, blockId: String, modifier: 
                 view.bind(session)
             }
         },
-        update = { view -> view.tag.let { if (it !== fonts) { view.tag = fonts; view.fontsChanged() } } },
+        update = { view ->
+            view.improveContrast = settings.improveContrast
+            view.tag.let { if (it !== fonts) { view.tag = fonts; view.fontsChanged() } }
+        },
         onRelease = { it.bind(null) },
     )
 }
