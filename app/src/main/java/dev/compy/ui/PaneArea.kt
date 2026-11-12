@@ -45,6 +45,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DragIndicator
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.OpenWith
 import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.SwapHoriz
@@ -97,6 +98,7 @@ import dev.compy.rex.LayerView
 import dev.compy.rex.LayoutNode
 import dev.compy.rex.TerminalSession
 import dev.compy.rex.WindowView
+import dev.compy.term.TerminalLook
 import dev.compy.term.TerminalView
 import kotlin.math.roundToInt
 
@@ -1090,6 +1092,8 @@ fun TerminalPane(
     val agent = remember(statusApp, process) { ProgramNames.candidates(statusApp, process).firstOrNull { it in CHAT_AGENTS } }
     val chat = agent != null && controller.chatShown[blockId] == true
     val keyboard = LocalSoftwareKeyboardController.current
+    val terminalLook = remember(settings) { settings.terminalLook() }
+    var scrolledUp by remember(blockId) { mutableStateOf(false) }
     val ringColor by animateColorAsState(
         if (showFocusRing && focused) scheme.primary.copy(alpha = 0.75f) else Color.Transparent,
         motion(MOTION_SHORT),
@@ -1110,6 +1114,7 @@ fun TerminalPane(
                 TerminalView(ctx) { app.fonts.value }.also { view ->
                     view.fontSizeSp = settings.fontSizeSp
                     view.host = controller.host(blockId) { latestTap.value() }
+                    view.onScrolledUp = { scrolledUp = it }
                     view.bind(session)
                     controller.register(blockId, view)
                 }
@@ -1120,7 +1125,7 @@ fun TerminalPane(
                 view.keepSize = settings.sizeModes[controller.sessionId] == SizeMode.Keep
                 view.paneFocused = focused && interactive && !chat
                 view.fontSizeSp = settings.fontSizeSp
-                view.improveContrast = settings.improveContrast
+                view.look = terminalLook
                 view.tag.let { if (it !== fonts) { view.tag = fonts; view.fontsChanged() } }
             },
             onRelease = { view ->
@@ -1147,6 +1152,17 @@ fun TerminalPane(
                 },
                 modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
             )
+        }
+        // While looking back through history, one tap returns to the newest line.
+        AnimatedVisibility(
+            scrolledUp && interactive && !chat,
+            Modifier.align(Alignment.BottomEnd).padding(10.dp),
+            enter = fadeIn(motion(MOTION_SHORT)) + scaleIn(motion(MOTION_SHORT), initialScale = 0.7f),
+            exit = fadeOut(motion(MOTION_SHORT)) + scaleOut(motion(MOTION_SHORT), targetScale = 0.7f),
+        ) {
+            RoundButton(Icons.Rounded.KeyboardArrowDown, "Go to the newest line", size = 40.dp) {
+                controller.view(blockId)?.scrollToBottom()
+            }
         }
         if (fallback && !chat) {
             Surface(
@@ -1226,12 +1242,24 @@ fun TerminalPreview(controller: WorkspaceController, blockId: String, modifier: 
             }
         },
         update = { view ->
-            view.improveContrast = settings.improveContrast
+            view.look = settings.terminalLook()
             view.tag.let { if (it !== fonts) { view.tag = fonts; view.fontsChanged() } }
         },
         onRelease = { it.bind(null) },
     )
 }
+
+/** The terminal options from Settings, as the terminal view takes them. */
+private fun dev.compy.data.Settings.terminalLook() = TerminalLook(
+    lineHeight = lineHeight,
+    letterSpacing = letterSpacing,
+    cursorStyle = cursorStyle,
+    cursorBlink = cursorBlink,
+    cursorWidth = cursorWidth,
+    ligatures = ligatures,
+    improveContrast = improveContrast,
+    tapMovesCursor = tapMovesCursor,
+)
 
 /** Gives a terminal the colors chosen in Compy, wherever it's shown. */
 @Composable

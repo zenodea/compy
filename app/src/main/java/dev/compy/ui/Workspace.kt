@@ -571,6 +571,15 @@ fun Workspace(
         DetachedSheet(controller, window, onClose = { showDetached = false }, onMessage = onMessage)
     }
 
+    controller.pendingPaste?.let { paste ->
+        AlertDialog(
+            onDismissRequest = { controller.pendingPaste = null },
+            title = { Text("Paste ${paste.lines} lines?") },
+            text = { Text("This program takes each line as it arrives. In a shell, every line but the last would run as a command.") },
+            confirmButton = { TextButton(onClick = { controller.confirmPaste() }) { Text("Paste") } },
+            dismissButton = { TextButton(onClick = { controller.pendingPaste = null }) { Text("Cancel") } },
+        )
+    }
     if (composer) {
         ComposerSheet(controller, settings.composerSendsEnter, onClose = { composer = false })
     }

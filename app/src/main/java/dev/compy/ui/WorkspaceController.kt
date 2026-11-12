@@ -80,6 +80,8 @@ class WorkspaceController(
         sizeJobs.remove(blockId)?.cancel()
     }
 
+    fun view(blockId: String): TerminalView? = views[blockId]
+
     fun focusedView(): TerminalView? = focusedBlockId?.let { views[it] } ?: views.values.firstOrNull()
 
     fun toggleSticky(mod: Int) {
@@ -137,6 +139,32 @@ class WorkspaceController(
         connection.paste(sessionId, blockId ?: return, text)
     }
 
+    /** A paste of several lines that is waiting for the person to confirm it. */
+    data class PendingPaste(val blockId: String, val text: String, val lines: Int)
+
+    var pendingPaste by mutableStateOf<PendingPaste?>(null)
+
+    /**
+     * Pastes from the clipboard. Several lines going to a program that doesn't take a paste as one
+     * piece, such as a plain shell, would each run as a command, so those are confirmed first.
+     */
+    fun pasteChecked(text: String, blockId: String? = target()) {
+        val block = blockId ?: return
+        val lines = text.trimEnd('\n', '\r').count { it == '\n' } + 1
+        val whole = views[block]?.bracketedPaste == true
+        if (lines > 1 && !whole && app.settings.value.pasteWarning) {
+            pendingPaste = PendingPaste(block, text, lines)
+        } else {
+            connection.paste(sessionId, block, text)
+        }
+    }
+
+    fun confirmPaste() {
+        val paste = pendingPaste ?: return
+        pendingPaste = null
+        connection.paste(sessionId, paste.blockId, paste.text)
+    }
+
     fun clipboardText(): String? {
         val clip = context.getSystemService(ClipboardManager::class.java).primaryClip ?: return null
         if (clip.itemCount == 0) return null
@@ -167,7 +195,7 @@ class WorkspaceController(
                 val character = def.key.takeIf { it.startsWith("key_") || it.startsWith("digit_") }?.substringAfter('_')
                 sendKey(RexKey(def.key, mods, unshifted = character?.firstOrNull()?.code ?: 0))
             }
-            "paste" -> clipboardText()?.let { paste(it) }
+            "paste" -> clipboardText()?.let { pasteChecked(it) }
             "prompt" -> focusedView()?.jumpPrompt(def.key.toIntOrNull() ?: return)
         }
     }
@@ -180,7 +208,7 @@ class WorkspaceController(
 
         override fun sendKey(key: RexKey) = connection.sendKey(sessionId, blockId, key)
         override fun sendText(text: String) = this@WorkspaceController.sendText(text, blockId)
-        override fun paste(text: String) = connection.paste(sessionId, blockId, text)
+        override fun paste(text: String) = pasteChecked(text, blockId)
 
         override fun sendMouse(action: String, button: String?, col: Int, row: Int) {
             connection.sendMouse(sessionId, blockId, mousePayload(action, button, col, row))

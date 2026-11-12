@@ -147,6 +147,23 @@ private fun Row2(title: String, subtitle: String? = null, onClick: (() -> Unit)?
     )
 }
 
+/** A setting on a slider, saved when the thumb is let go so the file isn't rewritten on every step. */
+@Composable
+private fun SliderRow(
+    title: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    steps: Int,
+    format: (Float) -> String,
+    onChange: (Float) -> Unit,
+) {
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+        var shown by remember(value) { mutableFloatStateOf(value) }
+        Text("$title: ${format(shown)}", style = MaterialTheme.typography.bodyLarge)
+        Slider(shown, onValueChange = { shown = it }, onValueChangeFinished = { onChange(shown) }, valueRange = range, steps = steps)
+    }
+}
+
 @Composable
 private fun SwitchRow(title: String, subtitle: String?, checked: Boolean, onChange: (Boolean) -> Unit) {
     Row2(title, subtitle, onClick = { onChange(!checked) }) { Switch(checked, onChange) }
@@ -355,8 +372,42 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
                             TextButton(onClick = { fontPicker.launch(arrayOf("font/*", "application/x-font-ttf", "application/octet-stream")) }) { Text("Import") }
                         }
                     }
+                    SliderRow("Line height", settings.lineHeight, 1f..1.6f, steps = 11, format = { "%.2f".format(it) }) { v ->
+                        update { it.copy(lineHeight = v) }
+                    }
+                    SliderRow("Letter spacing", settings.letterSpacing, -1f..3f, steps = 7, format = { "%.1f".format(it) }) { v ->
+                        update { it.copy(letterSpacing = v) }
+                    }
+                    SwitchRow("Ligatures", "Join pairs such as => and != into one symbol", settings.ligatures) { on ->
+                        update { it.copy(ligatures = on) }
+                    }
                     SwitchRow("Readable text colors", "Lighten or darken text that is too close to its background", settings.improveContrast) { on ->
                         update { it.copy(improveContrast = on) }
+                    }
+                }
+            }
+            item {
+                Group("Cursor and typing") {
+                    Text(
+                        "Cursor shape",
+                        Modifier.padding(start = 16.dp, top = 14.dp),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    Segments(
+                        listOf("program" to "Auto", "block" to "Block", "bar" to "Bar", "underline" to "Line"),
+                        settings.cursorStyle,
+                    ) { style -> update { it.copy(cursorStyle = style) } }
+                    SliderRow("Bar and line thickness", settings.cursorWidth, 1f..4f, steps = 5, format = { "%.1f".format(it) }) { v ->
+                        update { it.copy(cursorWidth = v) }
+                    }
+                    SwitchRow("Blinking cursor", "Blink when the program asks for a blinking cursor", settings.cursorBlink) { on ->
+                        update { it.copy(cursorBlink = on) }
+                    }
+                    SwitchRow("Tap to move the cursor", "On the line you are typing, while the keyboard is open", settings.tapMovesCursor) { on ->
+                        update { it.copy(tapMovesCursor = on) }
+                    }
+                    SwitchRow("Ask before pasting several lines", "When the program would run each line as a command", settings.pasteWarning) { on ->
+                        update { it.copy(pasteWarning = on) }
                     }
                     Row2("Key bar", "Reorder keys, add your own and arrange pages", onClick = onEditKeyBar)
                 }

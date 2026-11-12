@@ -58,6 +58,20 @@ data class Settings(
     val customFontPath: String? = null,
     /** Moves text colors that are too close to their background until they can be read. */
     val improveContrast: Boolean = true,
+    /** Row height as a multiple of the font's own. */
+    val lineHeight: Float = 1f,
+    /** Extra room between letters, in dp. */
+    val letterSpacing: Float = 0f,
+    /** `program` follows what runs in the terminal; otherwise `block`, `bar` or `underline`. */
+    val cursorStyle: String = "program",
+    val cursorBlink: Boolean = true,
+    /** Thickness of a bar or underline cursor, in dp. */
+    val cursorWidth: Float = 2f,
+    val ligatures: Boolean = false,
+    /** A tap on the line being typed moves the cursor there. */
+    val tapMovesCursor: Boolean = true,
+    /** Ask before pasting several lines into a program that would run each as it arrives. */
+    val pasteWarning: Boolean = true,
     val biometricLock: Boolean = true,
     val blockScreenshots: Boolean = false,
     val keyBarPages: List<List<KeyDef>> = DefaultKeyBar.pages,

@@ -105,10 +105,9 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             }
         }
 
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG or Paint.LINEAR_TEXT_FLAG).apply {
-        fontFeatureSettings = "'liga' 0, 'calt' 0"
-    }
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG or Paint.LINEAR_TEXT_FLAG)
     private val fillPaint = Paint()
+    private val handlePaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     private val rect = RectF()
     private val path = Path()
@@ -122,15 +121,27 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     /** Changes whenever the font or its size does, so rows drawn with the old one aren't reused. */
     private var styleGeneration = 0
 
-    /** Moves text colors that are too close to their background until they can be read. */
-    var improveContrast = true
+    /** How the person set the terminal to look and behave. */
+    var look = TerminalLook()
         set(value) {
-            if (field != value) {
-                field = value
-                styleGeneration++
-                invalidate()
+            if (field == value) return
+            val resized = field.lineHeight != value.lineHeight || field.letterSpacing != value.letterSpacing ||
+                field.ligatures != value.ligatures
+            field = value
+            styleGeneration++
+            if (resized) {
+                measureCell()
+                reportGrid()
             }
+            invalidate()
         }
+
+    /** Told when the view starts or stops showing history, for a button that goes back to the newest line. */
+    var onScrolledUp: ((Boolean) -> Unit)? = null
+    private var scrolledUp = false
+
+    /** True when the program accepts a paste as one piece, so its line breaks don't run anything. */
+    val bracketedPaste: Boolean get() = meta[GhosttyTerminal.META_BRACKETED] != 0
 
     private val meta = IntArray(GhosttyTerminal.META_COUNT)
     private var cells = IntArray(0)
@@ -247,16 +258,29 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         textPaint.typeface = fonts().regular
         textPaint.textSize = fontSizeSp * scaledDensity
         textPaint.textScaleX = 1f
+        textPaint.letterSpacing = 0f
+        textPaint.fontFeatureSettings = if (look.ligatures) null else "'liga' 0, 'calt' 0"
         // Monospace fonts have fractional advances. Measuring a long run and dividing gives the
         // real one, and stretching glyphs by under a pixel then makes each cell a whole number of
         // pixels wide, so text, lines and backgrounds all land on the same pixel grid.
         val natural = textPaint.measureText(RULER) / RULER.length
-        cellW = max(1f, Math.round(natural).toFloat())
-        stretch = if (natural > 0f) cellW / natural else 1f
-        textPaint.textScaleX = stretch
+        val extra = look.letterSpacing * density
+        cellW = max(1f, Math.round(natural + extra).toFloat())
+        // Extra room between letters is split to either side of each one, which keeps a
+        // character in the middle of its wider cell.
+        if (extra != 0f && textPaint.textSize > 0f) textPaint.letterSpacing = extra / textPaint.textSize
+        stretch = 1f
+        // Twice, since the stretch may or may not apply to the room between letters as well.
+        repeat(2) {
+            val advance = textPaint.measureText(RULER) / RULER.length
+            if (advance > 0f) stretch *= cellW / advance
+            textPaint.textScaleX = stretch
+        }
         val fm = textPaint.fontMetrics
-        cellH = max(1f, ceil(fm.descent - fm.ascent))
-        baseline = Math.round(-fm.ascent).toFloat()
+        val height = max(1f, ceil(fm.descent - fm.ascent))
+        cellH = max(1f, Math.round(height * look.lineHeight).toFloat())
+        // Taller rows keep the text in their middle.
+        baseline = Math.round(-fm.ascent) + floor((cellH - height) / 2)
         styleGeneration++
     }
 
@@ -383,13 +407,18 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                 linksPending = true
                 postDelayed(findLinks, LINK_DELAY_MS)
             }
-            if (selecting) updateActionMode()
             // A cursor that just moved is shown at once, whatever the blink was doing.
             val cx = meta[GhosttyTerminal.META_CURSOR_X]
             val cy = meta[GhosttyTerminal.META_CURSOR_Y]
             if (cx != lastCursorX || cy != lastCursorY) blinkFrom = now
             lastCursorX = cx
             lastCursorY = cy
+        }
+        if (selecting) {
+            // The engine keeps a selection on its text, so its ends are read back every frame.
+            val before = selStartY * 31 + selEndY
+            readSelection()
+            if (changed || before != selStartY * 31 + selEndY) updateActionMode()
         }
         canvas.drawColor(defaultBg)
         // Soften the moment text rewraps to a new size, instead of letting it snap.
@@ -408,6 +437,12 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         // With nothing above the screen there is nothing to show part of.
         if (meta[GhosttyTerminal.META_ABOVE] == 0) scrollFrac = 0f
         val rowsUp = rowsUp()
+        val up = rowsUp > 0 && !appOwnsScroll
+        if (up != scrolledUp) {
+            scrolledUp = up
+            // Not from inside a draw, where the screen it changes is already being built.
+            post { onScrolledUp?.invoke(up) }
+        }
         if (rowsUp == 0 && scrollFrac > 0f && !touching && scroller.isFinished) {
             // Back at the newest line: let the last part of a row slide away, so the screen's
             // bottom row and the cursor are whole again.
@@ -441,8 +476,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         canvas.restore()
         if (softening) canvas.restore()
         drawScrollbar(canvas)
-        val blinking = meta[GhosttyTerminal.META_CURSOR_BLINK] != 0 && paneFocused && interactive
-        if (blinking) {
+        if (blinks && interactive) {
             // One pending redraw, at the next change of phase. Every frame used to add its own,
             // each of which drew a frame that added another, so a burst of output left the view
             // redrawing constantly for as long as it stayed open.
@@ -457,6 +491,15 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     }
 
     private val blinkRunnable = Runnable { invalidate() }
+
+    /** Whether the cursor blinks: the person allows it, the program asks for it and this pane has the keyboard. */
+    private val blinks get() = look.cursorBlink && meta[GhosttyTerminal.META_CURSOR_BLINK] != 0 && paneFocused
+
+    /** Shows the newest line again. */
+    fun scrollToBottom() {
+        toBottom()
+        invalidate()
+    }
 
     private val findLinks = Runnable {
         linksPending = false
@@ -836,7 +879,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     private fun effectiveFg(fg: Int, bg: Int, flags: Int, defaultFg: Int, defaultBg: Int): Int {
         if (flags and FLAG_SELECTED != 0) return defaultBg
         val color = if (flags and FLAG_INVERSE != 0) (if (bg != 0) bg else defaultBg) else if (fg != 0) fg else defaultFg
-        if (!improveContrast) return color
+        if (!look.improveContrast) return color
         return readable(color, effectiveBg(fg, bg, flags, defaultFg, defaultBg))
     }
 
@@ -875,10 +918,16 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         val right = left + cellW * span
         val bottom = top + cellH
         val thin = max(1f, Math.round(density * 1.25f).toFloat())
-        val bar = max(2f, Math.round(density * 2f).toFloat())
+        val bar = max(1f, Math.round(density * look.cursorWidth).toFloat())
         fillPaint.color = color
-        val blinkedOff = meta[GhosttyTerminal.META_CURSOR_BLINK] != 0 && paneFocused && !blinkOn
-        if (!paneFocused || meta[GhosttyTerminal.META_CURSOR_STYLE] == 3) {
+        val blinkedOff = blinks && !blinkOn
+        val style = when (look.cursorStyle) {
+            "bar" -> 0
+            "block" -> 1
+            "underline" -> 2
+            else -> meta[GhosttyTerminal.META_CURSOR_STYLE]
+        }
+        if (!paneFocused || style == 3) {
             // Four edges inside the cell, which stay sharp where a stroked outline would blur.
             canvas.drawRect(left, top, right, top + thin, fillPaint)
             canvas.drawRect(left, bottom - thin, right, bottom, fillPaint)
@@ -887,7 +936,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             return
         }
         if (blinkedOff) return
-        when (meta[GhosttyTerminal.META_CURSOR_STYLE]) {
+        when (style) {
             0 -> canvas.drawRect(left, top, left + bar, bottom, fillPaint)
             2 -> canvas.drawRect(left, bottom - bar, right, bottom, fillPaint)
             else -> {
@@ -911,11 +960,13 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
 
     private fun drawHandles(canvas: Canvas, s: Float) {
         if (!selecting) return
-        fillPaint.color = meta[GhosttyTerminal.META_FG]
+        handlePaint.color = meta[GhosttyTerminal.META_FG]
         val r = HANDLE_RADIUS_DP * density / s
+        val rows = meta[GhosttyTerminal.META_ROWS]
         val (sx, sy, ex, ey) = ordered()
-        canvas.drawCircle(sx * cellW, sy * cellH, r, fillPaint)
-        canvas.drawCircle((ex + 1) * cellW, (ey + 1) * cellH, r, fillPaint)
+        // An end that has scrolled out of view has no handle to hold.
+        if (sy in 0 until rows) canvas.drawCircle(sx * cellW, sy * cellH, r, handlePaint)
+        if (ey in 0 until rows) canvas.drawCircle((ex + 1) * cellW, (ey + 1) * cellH, r, handlePaint)
     }
 
     private fun drawScrollbar(canvas: Canvas) {
@@ -1133,10 +1184,14 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                     return true
                 }
             }
+            // Read before the tap is passed on, which may be what brings the keyboard up.
+            val typingHere = paneFocused && keyboardShown()
             host?.onTapped()
             if (meta[GhosttyTerminal.META_MOUSE] != 0) {
                 host?.sendMouse("press", "left", col, row)
                 host?.sendMouse("release", "left", col, row)
+            } else if (typingHere) {
+                moveCursorTo(col, row)
             }
             return true
         }
@@ -1169,6 +1224,41 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             startSelection(cellX(e.x), cellY(e.y))
         }
     })
+
+    private fun keyboardShown() = rootWindowInsets?.isVisible(android.view.WindowInsets.Type.ime()) == true
+
+    /**
+     * Moves the cursor to a tapped place on the line being typed, by sending the arrow keys a
+     * keyboard would need. Only on the cursor's own line, which may be wrapped over several rows,
+     * and never in a full-screen program, where arrow keys mean something else.
+     */
+    private fun moveCursorTo(col: Int, row: Int) {
+        val h = host ?: return
+        if (!look.tapMovesCursor || appOwnsScroll || meta[GhosttyTerminal.META_CURSOR_VISIBLE] == 0 || rowsUp() != 0) return
+        val cols = meta[GhosttyTerminal.META_COLS]
+        val rows = meta[GhosttyTerminal.META_ROWS]
+        val cx = meta[GhosttyTerminal.META_CURSOR_X]
+        val cy = meta[GhosttyTerminal.META_CURSOR_Y]
+        if (cx !in 0 until cols || cy !in 0 until rows || row !in 0 until rows) return
+        for (y in min(row, cy) until max(row, cy)) {
+            if (cells[y * cols * 4 + 3] and GhosttyTerminal.FLAG_WRAPS == 0) return
+        }
+        // A tap past the end of the text goes to its end.
+        var end = cols
+        while (end > 0 && cells[(row * cols + end - 1) * 4] == 0) end--
+        if (row == cy) end = max(end, cx)
+        val from = cy * cols + cx
+        val to = row * cols + min(col, min(end, cols - 1))
+        if (to == from) return
+        // One key for each character between, where a wide character is two cells.
+        var steps = 0
+        for (i in min(from, to) until max(from, to)) {
+            if (cells[i * 4 + 3] and FLAG_SPACER == 0) steps++
+        }
+        val key = if (to > from) RexKey.RIGHT else RexKey.LEFT
+        repeat(min(steps, MAX_CURSOR_STEPS)) { h.sendKey(key) }
+        blinkFrom = SystemClock.uptimeMillis()
+    }
 
     private val flingRunnable = object : Runnable {
         override fun run() {
@@ -1279,6 +1369,18 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             Ordered(selEndX, selEndY, selStartX, selStartY)
         }
 
+    private val selectionBounds = IntArray(4)
+
+    /** Reads where the selection's ends are now. A row above the screen is negative; one below is past its last. */
+    private fun readSelection() {
+        val terminal = session?.terminal ?: return
+        if (!terminal.selectionBounds(selectionBounds)) return
+        selStartX = selectionBounds[0]
+        selStartY = selectionBounds[1]
+        selEndX = selectionBounds[2]
+        selEndY = selectionBounds[3]
+    }
+
     private fun startSelection(x: Int, y: Int) {
         val terminal = session?.terminal ?: return
         selStartX = x
@@ -1288,29 +1390,55 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         terminal.selectRange(x, y, x, y)
         selecting = true
         // Grow to the word under the finger when there is one; otherwise a single cell is selected.
-        if (terminal.selectWord(x, y)) expandToWord(x, y)
+        terminal.selectWord(x, y)
+        // The finger is still down, and dragging on from here moves the selection's end.
+        terminal.grabSelection(first = false)
+        readSelection()
         draggingHandle = 2
         invalidate()
         updateActionMode()
     }
 
-    /** Finds the selected span on this row from the frame the engine just produced. */
-    private fun expandToWord(x: Int, y: Int) {
+    private var dragX = 0f
+    private var dragY = 0f
+    private var edgeDirection = 0
+    private var edgeScrolling = false
+
+    /** Moves the held end of the selection under the finger, and scrolls while the finger rests at an edge. */
+    private fun dragSelectionTo(px: Float, py: Float) {
         val terminal = session?.terminal ?: return
-        synchronized(terminal.lock) {
-            terminal.render(true)
-            // That render took the pending change, so the next draw must not wait for another.
-            haveFrame = false
-            val cols = terminal.meta[GhosttyTerminal.META_COLS]
-            if (y >= terminal.meta[GhosttyTerminal.META_ROWS]) return
-            var left = x
-            var right = x
-            val all = terminal.cells
-            fun selected(c: Int) = all[(y * cols + c) * 4 + 3] and FLAG_SELECTED != 0
-            while (left > 0 && selected(left - 1)) left--
-            while (right < cols - 1 && selected(right + 1)) right++
-            selStartX = left
-            selEndX = right
+        dragX = px
+        dragY = py
+        terminal.extendSelection(cellX(px), cellY(py))
+        readSelection()
+        invalidate()
+        val top = max(0f, originY)
+        val bottom = min(height.toFloat(), originY + meta[GhosttyTerminal.META_ROWS] * cellH * drawScale)
+        val zone = cellH * drawScale * 1.2f
+        edgeDirection = when {
+            py < top + zone && meta[GhosttyTerminal.META_SCROLL_OFFSET] > 0 && !appOwnsScroll -> -1
+            py > bottom - zone && rowsUp() > 0 && !appOwnsScroll -> 1
+            else -> 0
+        }
+        if (edgeDirection != 0 && !edgeScrolling) {
+            edgeScrolling = true
+            postDelayed(edgeScroll, EDGE_SCROLL_MS)
+        }
+    }
+
+    private val edgeScroll = object : Runnable {
+        override fun run() {
+            val terminal = session?.terminal
+            if (terminal == null || draggingHandle == 0 || edgeDirection == 0) {
+                edgeScrolling = false
+                return
+            }
+            scrollFrac = 0f
+            terminal.scroll(edgeDirection)
+            terminal.extendSelection(cellX(dragX), cellY(dragY))
+            scrollbarVisibleUntil = SystemClock.uptimeMillis() + 800
+            invalidate()
+            postDelayed(this, EDGE_SCROLL_MS)
         }
     }
 
@@ -1332,30 +1460,21 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                     else -> 0
                 }
                 if (draggingHandle != 0) {
-                    // Keep the opposite end fixed while this one follows the finger.
-                    selStartX = sx; selStartY = sy; selEndX = ex; selEndY = ey
+                    // The opposite end stays on its text while this one follows the finger.
+                    session?.terminal?.grabSelection(first = draggingHandle == 1)
                     return true
                 }
                 return false
             }
             MotionEvent.ACTION_MOVE -> {
                 if (draggingHandle == 0) return false
-                val x = cellX(event.x)
-                val y = cellY(event.y)
-                if (draggingHandle == 1) {
-                    selStartX = x
-                    selStartY = y
-                } else {
-                    selEndX = x
-                    selEndY = y
-                }
-                session?.terminal?.selectRange(selStartX, selStartY, selEndX, selEndY)
-                invalidate()
+                dragSelectionTo(event.x, event.y)
                 return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 val was = draggingHandle
                 draggingHandle = 0
+                edgeDirection = 0
                 updateActionMode()
                 return was != 0
             }
@@ -1398,7 +1517,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                     ID_OUTPUT -> {
                         val terminal = session?.terminal
                         val (sx, sy) = ordered()
-                        val text = if (terminal?.selectOutputAt(sx, sy) == true) terminal.selectionText() else null
+                        val row = sy.coerceIn(0, max(0, meta[GhosttyTerminal.META_ROWS] - 1))
+                        val text = if (terminal?.selectOutputAt(sx, row) == true) terminal.selectionText() else null
                         if (text.isNullOrEmpty()) {
                             host?.showMessage(NO_OUTPUT_MARKS)
                         } else {
@@ -1424,11 +1544,13 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                 val (sx, sy, ex, ey) = ordered()
                 val left = originX
                 val top = originY + scrollFrac * s
+                // The part of the selection that is on screen, so the menu stays beside it.
+                val last = max(0, meta[GhosttyTerminal.META_ROWS] - 1)
                 outRect.set(
                     (left + sx * cellW * s).toInt(),
-                    (top + sy * cellH * s).toInt(),
+                    (top + sy.coerceIn(0, last) * cellH * s).toInt(),
                     (left + (ex + 1) * cellW * s).toInt(),
-                    (top + (ey + 1) * cellH * s).toInt(),
+                    (top + (ey.coerceIn(0, last) + 1) * cellH * s).toInt(),
                 )
             }
         }, ActionMode.TYPE_FLOATING)
@@ -1443,6 +1565,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         removeCallbacks(flingRunnable)
         removeCallbacks(fitWaitOver)
         removeCallbacks(findLinks)
+        removeCallbacks(edgeScroll)
+        edgeScrolling = false
         linksPending = false
         scroller.forceFinished(true)
         rowNodes.clear()
@@ -1532,6 +1656,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         /** How long the text keeps its size while the server is asked to fit the terminal. */
         private const val FIT_WAIT_MS = 1500L
         private const val LINK_DELAY_MS = 120L
+        private const val EDGE_SCROLL_MS = 45L
+        private const val MAX_CURSOR_STEPS = 400
         private const val RULER = "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM"
         private const val HASH_SEED = -0x340d631b7bdddcdbL
         private const val HASH_PRIME = 0x100000001b3L

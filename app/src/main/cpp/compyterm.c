@@ -26,6 +26,9 @@ enum { FLAG_BOLD = 1, FLAG_ITALIC = 2, FLAG_FAINT = 4, FLAG_INVERSE = 8, FLAG_IN
        FLAG_STRIKE = 32, FLAG_UNDERLINE = 64, FLAG_OVERLINE = 128, FLAG_BLINK = 256,
        FLAG_SELECTED = 512, FLAG_WIDE = 1024, FLAG_SPACER = 2048, FLAG_LINK = 4096 };
 
+/* Set on a row's first cell when its line carries on into the next row. */
+#define FLAG_WRAPS (1 << 16)
+
 /* The underline's kind sits above the flags: 1 single, 2 double, 3 curly, 4 dotted, 5 dashed. */
 #define UNDERLINE_SHIFT 13
 
@@ -251,6 +254,11 @@ JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeRender(
       }
       GhosttyRenderStateRowSelection sel = GHOSTTY_INIT_SIZED(GhosttyRenderStateRowSelection);
       bool hasSel = ghostty_render_state_row_get(h->rows, GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION, &sel) == GHOSTTY_SUCCESS;
+      bool wraps = false;
+      GhosttyRow rawRow = 0;
+      if (ghostty_render_state_row_get(h->rows, GHOSTTY_RENDER_STATE_ROW_DATA_RAW, &rawRow) == GHOSTTY_SUCCESS) {
+        ghostty_row_get(rawRow, GHOSTTY_ROW_DATA_WRAP, &wraps);
+      }
       ghostty_render_state_row_get(h->rows, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, &h->cells);
       int x = 0;
       jint* row = out + (size_t)y * cols * 4;
@@ -307,6 +315,7 @@ JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeRender(
           if (link) flags |= FLAG_LINK;
         }
         if (hasSel && x >= sel.start_x && x <= sel.end_x) flags |= FLAG_SELECTED;
+        if (wraps && x == 0) flags |= FLAG_WRAPS;
         c[0] = cp; c[1] = fg; c[2] = bg; c[3] = flags;
         x++;
       }
@@ -347,6 +356,58 @@ JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSelectWord(
   memset(&sel, 0, sizeof(sel));
   if (ghostty_terminal_select_word(h->term, &o, &sel) != GHOSTTY_SUCCESS) return JNI_FALSE;
   return ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_SELECTION, &sel) == GHOSTTY_SUCCESS;
+}
+
+// Moves the end of the selection to a cell, keeping its start where it is even if that has
+// scrolled out of view.
+JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeExtendSelection(
+    JNIEnv* env, jclass cls, jlong handle, jint x, jint y) {
+  Term* h = (Term*)(intptr_t)handle;
+  GhosttySelection sel;
+  memset(&sel, 0, sizeof(sel));
+  if (ghostty_terminal_get(h->term, GHOSTTY_TERMINAL_DATA_SELECTION, &sel) != GHOSTTY_SUCCESS) return JNI_FALSE;
+  if (!viewport_ref(h, x, y, &sel.end)) return JNI_FALSE;
+  return ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_SELECTION, &sel) == GHOSTTY_SUCCESS;
+}
+
+/* Where the selection's two ends are, counted in rows from the top of all history. */
+static bool selection_points(Term* h, GhosttySelection* sel, GhosttyPointCoordinate* a, GhosttyPointCoordinate* b) {
+  memset(sel, 0, sizeof(*sel));
+  return ghostty_terminal_get(h->term, GHOSTTY_TERMINAL_DATA_SELECTION, sel) == GHOSTTY_SUCCESS &&
+         ghostty_terminal_point_from_grid_ref(h->term, &sel->start, GHOSTTY_POINT_TAG_SCREEN, a) == GHOSTTY_SUCCESS &&
+         ghostty_terminal_point_from_grid_ref(h->term, &sel->end, GHOSTTY_POINT_TAG_SCREEN, b) == GHOSTTY_SUCCESS;
+}
+
+// Makes the selection's first or last end the one that nativeExtendSelection moves.
+JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeGrabSelection(
+    JNIEnv* env, jclass cls, jlong handle, jboolean first) {
+  Term* h = (Term*)(intptr_t)handle;
+  GhosttySelection sel;
+  GhosttyPointCoordinate a, b;
+  if (!selection_points(h, &sel, &a, &b)) return JNI_FALSE;
+  bool startIsFirst = a.y < b.y || (a.y == b.y && a.x <= b.x);
+  if ((first != JNI_FALSE) != startIsFirst) return JNI_TRUE;
+  GhosttyGridRef moved = sel.start;
+  sel.start = sel.end;
+  sel.end = moved;
+  return ghostty_terminal_set(h->term, GHOSTTY_TERMINAL_OPT_SELECTION, &sel) == GHOSTTY_SUCCESS;
+}
+
+// Writes the selection's ends as start x, start y, end x, end y, with rows counted from the top of
+// the screen: negative above it, and past its last row below. False when nothing is selected.
+JNIEXPORT jboolean JNICALL Java_dev_compy_term_GhosttyTerminal_nativeSelectionBounds(
+    JNIEnv* env, jclass cls, jlong handle, jintArray out) {
+  Term* h = (Term*)(intptr_t)handle;
+  if ((*env)->GetArrayLength(env, out) < 4) return JNI_FALSE;
+  GhosttySelection sel;
+  GhosttyPointCoordinate a, b, top;
+  if (!selection_points(h, &sel, &a, &b)) return JNI_FALSE;
+  GhosttyGridRef corner;
+  if (!viewport_ref(h, 0, 0, &corner) ||
+      ghostty_terminal_point_from_grid_ref(h->term, &corner, GHOSTTY_POINT_TAG_SCREEN, &top) != GHOSTTY_SUCCESS) return JNI_FALSE;
+  jint values[4] = { a.x, (jint)((int64_t)a.y - (int64_t)top.y), b.x, (jint)((int64_t)b.y - (int64_t)top.y) };
+  (*env)->SetIntArrayRegion(env, out, 0, 4, values);
+  return JNI_TRUE;
 }
 
 JNIEXPORT void JNICALL Java_dev_compy_term_GhosttyTerminal_nativeClearSelection(

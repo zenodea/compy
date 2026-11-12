@@ -56,6 +56,18 @@ class GhosttyTerminal private constructor(private var handle: Long) {
         handle != 0L && nativeSelectWord(handle, x, y)
     }
 
+    /** Moves the selection's end to a cell, keeping its start even when that has scrolled out of view. */
+    fun extendSelection(x: Int, y: Int) = synchronized(lock) { handle != 0L && nativeExtendSelection(handle, x, y) }
+
+    /** Makes the selection's first or last end the one [extendSelection] moves. */
+    fun grabSelection(first: Boolean) = synchronized(lock) { handle != 0L && nativeGrabSelection(handle, first) }
+
+    /**
+     * Writes the selection's ends into [out] as start x, start y, end x, end y. Rows count from the
+     * top of the screen, so an end that has scrolled away is negative or past the last row.
+     */
+    fun selectionBounds(out: IntArray) = synchronized(lock) { handle != 0L && nativeSelectionBounds(handle, out) }
+
     fun clearSelection() = synchronized(lock) { if (handle != 0L) nativeClearSelection(handle) }
     fun selectionText(): String? = synchronized(lock) { if (handle != 0L) nativeSelectionText(handle) else null }?.toString(Charsets.UTF_8)
 
@@ -125,6 +137,8 @@ class GhosttyTerminal private constructor(private var handle: Long) {
         const val FLAG_WIDE = 1024
         const val FLAG_SPACER = 2048
         const val FLAG_LINK = 4096
+        /** On a row's first cell, when its line carries on into the next row. */
+        const val FLAG_WRAPS = 1 shl 16
 
         /** The underline's kind, above the flags: 1 single, 2 double, 3 curly, 4 dotted, 5 dashed. */
         const val UNDERLINE_SHIFT = 13
@@ -153,6 +167,9 @@ class GhosttyTerminal private constructor(private var handle: Long) {
         @JvmStatic private external fun nativeRender(h: Long, meta: IntArray, cells: IntArray, extras: IntArray, force: Boolean, above: Int): Boolean
         @JvmStatic private external fun nativeSelectRange(h: Long, x1: Int, y1: Int, x2: Int, y2: Int): Boolean
         @JvmStatic private external fun nativeSelectWord(h: Long, x: Int, y: Int): Boolean
+        @JvmStatic private external fun nativeExtendSelection(h: Long, x: Int, y: Int): Boolean
+        @JvmStatic private external fun nativeGrabSelection(h: Long, first: Boolean): Boolean
+        @JvmStatic private external fun nativeSelectionBounds(h: Long, out: IntArray): Boolean
         @JvmStatic private external fun nativeClearSelection(h: Long)
         // Text comes back as UTF-8 bytes, since JNI's own strings can't carry all of it safely.
         @JvmStatic private external fun nativeSelectionText(h: Long): ByteArray?
