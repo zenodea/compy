@@ -66,6 +66,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         fun copyText(text: String)
         fun clipboardText(): String?
         fun openUrl(url: String)
+        /** Hands text to another app through Android's share sheet. */
+        fun shareText(text: String)
         fun showMessage(text: String)
     }
 
@@ -134,6 +136,15 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                 reportGrid()
             }
             invalidate()
+        }
+
+    /** What a pane shows before its terminal arrives: the theme's background, not a flash of black. */
+    var emptyColor = Color.BLACK
+        set(value) {
+            if (field != value) {
+                field = value
+                if (!haveFrame) invalidate()
+            }
         }
 
     /** Told when the view starts or stops showing history, for a button that goes back to the newest line. */
@@ -375,7 +386,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     override fun onDraw(canvas: Canvas) {
         val terminal = session?.terminal
         if (terminal == null) {
-            canvas.drawColor(if (haveFrame) meta[GhosttyTerminal.META_BG] else Color.BLACK)
+            canvas.drawColor(if (haveFrame) meta[GhosttyTerminal.META_BG] else emptyColor)
             return
         }
         val isNew = terminal !== boundTerminal
@@ -402,7 +413,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             updated
         }
         if (!haveFrame) {
-            canvas.drawColor(Color.BLACK)
+            canvas.drawColor(emptyColor)
             return
         }
         val cols = meta[GhosttyTerminal.META_COLS]
@@ -509,6 +520,14 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
 
     /** Whether the cursor blinks: the person allows it, the program asks for it and this pane has the keyboard. */
     private val blinks get() = look.cursorBlink && meta[GhosttyTerminal.META_CURSOR_BLINK] != 0 && paneFocused
+
+    /** The pane as a picture, as it looks now, for sharing. Null before it has a size. */
+    fun picture(): android.graphics.Bitmap? {
+        if (width <= 0 || height <= 0 || !haveFrame) return null
+        return runCatching {
+            android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888).also { draw(Canvas(it)) }
+        }.getOrNull()
+    }
 
     /** Shows the newest line again. */
     fun scrollToBottom() {
@@ -1036,23 +1055,62 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         if (ey in 0 until rows) canvas.drawCircle((ex + 1) * cellW, (ey + 1) * cellH, r, handlePaint)
     }
 
-    private fun drawScrollbar(canvas: Canvas) {
-        val now = SystemClock.uptimeMillis()
-        if (now > scrollbarVisibleUntil) return
+    // The scroll position marker, which can be held and dragged while it shows.
+    private var draggingBar = false
+    private var barGrab = 0f
+    private var barTop = 0f
+    private var barHeight = 0f
+
+    /** Works out where the marker is. False when there is no history to scroll through. */
+    private fun placeBar(): Boolean {
         val total = meta[GhosttyTerminal.META_SCROLL_TOTAL]
         val len = meta[GhosttyTerminal.META_SCROLL_LEN]
-        if (total <= len || total == 0) return
-        val offset = meta[GhosttyTerminal.META_SCROLL_OFFSET]
+        if (total <= len || total == 0) return false
         val h = height.toFloat()
-        val barH = max(h * len / total, 24 * density)
-        val top = (h - barH) * offset / max(1, total - len)
-        val w = 3 * density
+        // Tall enough to put a finger on, however long the history is.
+        barHeight = min(h, max(h * len / total, BAR_MIN_DP * density))
+        barTop = (h - barHeight) * meta[GhosttyTerminal.META_SCROLL_OFFSET] / max(1, total - len)
+        return true
+    }
+
+    private fun drawScrollbar(canvas: Canvas) {
+        val now = SystemClock.uptimeMillis()
+        if (draggingBar) scrollbarVisibleUntil = now + 800
+        if (now > scrollbarVisibleUntil || !placeBar()) return
+        val w = (if (draggingBar) 5 else 3) * density
         val remaining = scrollbarVisibleUntil - now
-        val alpha = (0x80 * min(1f, remaining.toFloat() / SCROLLBAR_FADE_MS)).toInt()
+        val strength = if (draggingBar) 0xC0 else 0x80
+        val alpha = (strength * min(1f, remaining.toFloat() / SCROLLBAR_FADE_MS)).toInt()
         fillPaint.color = (meta[GhosttyTerminal.META_FG] and 0xFFFFFF) or (alpha shl 24)
-        rect.set(width - w - 2 * density, top, width - 2 * density, top + barH)
+        rect.set(width - w - 2 * density, barTop, width - 2 * density, barTop + barHeight)
         canvas.drawRoundRect(rect, w, w, fillPaint)
+        if (draggingBar) return
         if (remaining > SCROLLBAR_FADE_MS) postInvalidateDelayed(remaining - SCROLLBAR_FADE_MS) else postInvalidateOnAnimation()
+    }
+
+    /** True for a touch that lands on the marker while it shows, with room around it for a finger. */
+    private fun onBar(x: Float, y: Float): Boolean {
+        if (appOwnsScroll || SystemClock.uptimeMillis() > scrollbarVisibleUntil || !placeBar()) return false
+        val reach = 12 * density
+        return x >= width - BAR_TOUCH_DP * density && y >= barTop - reach && y <= barTop + barHeight + reach
+    }
+
+    /** Moves through history as the marker is dragged: its place along the pane is the place in history. */
+    private fun dragBarTo(y: Float) {
+        val terminal = session?.terminal ?: return
+        if (!placeBar()) return
+        val range = meta[GhosttyTerminal.META_SCROLL_TOTAL] - meta[GhosttyTerminal.META_SCROLL_LEN]
+        val track = height - barHeight
+        val part = if (track > 0f) ((y - barGrab) / track).coerceIn(0f, 1f) else 1f
+        val target = Math.round(part * range)
+        val delta = target - meta[GhosttyTerminal.META_SCROLL_OFFSET]
+        if (delta != 0) {
+            terminal.scroll(delta)
+            // The next frame brings the real position; until then this keeps the marker under the finger.
+            meta[GhosttyTerminal.META_SCROLL_OFFSET] = target
+            scrollFrac = 0f
+        }
+        invalidate()
     }
 
     // Input method.
@@ -1290,7 +1348,33 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
             startSelection(cellX(e.x), cellY(e.y))
         }
+
+        /** A second tap selects the word under it. A program that takes the mouse gets the taps itself. */
+        override fun onDoubleTap(e: MotionEvent): Boolean {
+            if (scaling || meta[GhosttyTerminal.META_MOUSE] != 0) return false
+            performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+            startSelection(cellX(e.x), cellY(e.y))
+            doubleTapAt = SystemClock.uptimeMillis()
+            doubleTapRow = cellY(e.y)
+            return true
+        }
     })
+
+    private var doubleTapAt = 0L
+    private var doubleTapRow = -1
+    /** True while the rest of a touch that already did its work is ignored. */
+    private var swallowTouch = false
+
+    /** Selects a whole row, for a third tap. */
+    private fun selectLine(row: Int) {
+        val terminal = session?.terminal ?: return
+        terminal.selectRange(0, row, max(0, meta[GhosttyTerminal.META_COLS] - 1), row)
+        selecting = true
+        draggingHandle = 0
+        readSelection()
+        invalidate()
+        updateActionMode()
+    }
 
     private fun keyboardShown() = rootWindowInsets?.isVisible(android.view.WindowInsets.Type.ime()) == true
 
@@ -1383,8 +1467,47 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                 invalidate()
             }
         }
+        val ended = event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL
+        if (swallowTouch) {
+            if (ended) swallowTouch = false
+            return true
+        }
+        if (draggingBar) {
+            if (ended) {
+                draggingBar = false
+                scrollbarVisibleUntil = SystemClock.uptimeMillis() + 800
+                invalidate()
+            } else if (event.actionMasked == MotionEvent.ACTION_MOVE) {
+                dragBarTo(event.y)
+            }
+            return true
+        }
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            if (onBar(event.x, event.y)) {
+                scroller.forceFinished(true)
+                draggingBar = true
+                barGrab = event.y - barTop
+                performHapticFeedback(android.view.HapticFeedbackConstants.GESTURE_START)
+                invalidate()
+                return true
+            }
+            // A third tap, soon after the two that selected a word, takes the whole line.
+            val row = cellY(event.y)
+            if (selecting && row == doubleTapRow && SystemClock.uptimeMillis() - doubleTapAt < TRIPLE_TAP_MS) {
+                doubleTapAt = 0L
+                selectLine(row)
+                swallowTouch = true
+                cancelGestures(event)
+                return true
+            }
+        }
         scaleDetector.onTouchEvent(event)
-        if (selecting && handleSelectionDrag(event)) return true
+        if (selecting && handleSelectionDrag(event)) {
+            // The detector saw this touch start and won't see it end. Left waiting, it would
+            // call the still finger a long press a moment later and select all over again.
+            if (ended) cancelGestures(event)
+            return true
+        }
         gestures.onTouchEvent(event)
         if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
             scrollRemainder = 0f
@@ -1392,6 +1515,14 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             if (selecting) updateActionMode()
         }
         return true
+    }
+
+    /** Tells the gesture detector that a touch it was following is over, so it stops its timers. */
+    private fun cancelGestures(event: MotionEvent) {
+        val cancel = MotionEvent.obtain(event)
+        cancel.action = MotionEvent.ACTION_CANCEL
+        gestures.onTouchEvent(cancel)
+        cancel.recycle()
     }
 
     private var mouseButton = "left"
@@ -1570,6 +1701,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
                 menu.add(0, ID_COPY, 0, android.R.string.copy).setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
                 menu.add(0, ID_PASTE, 1, android.R.string.paste).setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
+                menu.add(0, ID_SHARE, 2, "Share").setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
                 menu.add(0, ID_OPEN, 2, "Open link").setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
                 menu.add(0, ID_OUTPUT, 3, "Copy command output").setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
                 return true
@@ -1581,6 +1713,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                 when (item.itemId) {
                     ID_COPY -> selectedText()?.let { host?.copyText(it) }
                     ID_PASTE -> host?.clipboardText()?.let { host?.paste(it) }
+                    ID_SHARE -> selectedText()?.takeIf { it.isNotEmpty() }?.let { host?.shareText(it) }
                     ID_OUTPUT -> {
                         val terminal = session?.terminal
                         val (sx, sy) = ordered()
@@ -1747,8 +1880,12 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         private const val ID_PASTE = 2
         private const val ID_OPEN = 3
         private const val ID_OUTPUT = 4
+        private const val ID_SHARE = 5
+        private const val TRIPLE_TAP_MS = 450L
+        private const val BAR_MIN_DP = 40f
+        private const val BAR_TOUCH_DP = 32f
         private const val SEARCH_MATCH = 0x66F59E0B
         private const val SEARCH_SELECTED = 0xB3F97316.toInt()
-        const val NO_OUTPUT_MARKS = "This shell doesn't mark command output. It needs shell integration turned on."
+        const val NO_OUTPUT_MARKS = "This shell doesn't mark command output. \"Set up prompt jumps\" in the command menu turns that on."
     }
 }

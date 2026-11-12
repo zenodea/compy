@@ -359,7 +359,7 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
                             onValueChangeFinished = { update { it.copy(fontSizeSp = size) } },
                             valueRange = TerminalView.MIN_FONT..TerminalView.MAX_FONT,
                         )
-                        Text("You can also pinch a terminal.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("For every pane. Pinching a pane sizes that pane alone.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Row2("Font", if (settings.customFontPath == null) "JetBrains Mono Nerd Font" else "Imported font") {
                         Row {
@@ -383,6 +383,9 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
                     }
                     SwitchRow("Readable text colors", "Lighten or darken text that is too close to its background", settings.improveContrast) { on ->
                         update { it.copy(improveContrast = on) }
+                    }
+                    SwitchRow("Keep the screen on", "While an agent in a pane on screen is working", settings.keepScreenOn) { on ->
+                        update { it.copy(keepScreenOn = on) }
                     }
                 }
             }

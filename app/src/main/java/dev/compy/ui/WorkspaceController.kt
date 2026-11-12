@@ -17,6 +17,7 @@ import dev.compy.rex.RexKey
 import dev.compy.rex.ServerConnection
 import dev.compy.rex.TranscriptFeed
 import dev.compy.rex.hostSetupCommand
+import dev.compy.rex.shellSetupCommand
 import dev.compy.term.TerminalView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -175,6 +176,61 @@ class WorkspaceController(
         context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Terminal", text))
     }
 
+    /** Gives a pane back the text size from Settings. */
+    fun resetFontSize(blockId: String) {
+        app.updateSettings { it.copy(paneFontSizes = it.paneFontSizes - blockId) }
+    }
+
+    private fun startChooser(send: Intent) {
+        runCatching {
+            context.startActivity(Intent.createChooser(send, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }.onFailure { showMessage("No app can take that") }
+    }
+
+    /** Hands text to another app through Android's share sheet. */
+    fun share(text: String) {
+        startChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text))
+    }
+
+    /** Shares a picture of a pane as it looks now. */
+    fun sharePicture(blockId: String) {
+        if (app.settings.value.blockScreenshots) {
+            showMessage("Hide from screenshots is on in Settings, so panes can't be shared as pictures")
+            return
+        }
+        val picture = views[blockId]?.picture()
+        if (picture == null) {
+            showMessage("This pane has nothing to show yet")
+            return
+        }
+        app.scope.launch(Dispatchers.IO) {
+            val uri = runCatching {
+                val folder = java.io.File(context.cacheDir, "shared").apply { mkdirs() }
+                // One file, written over each time, so shared pictures don't pile up.
+                val file = java.io.File(folder, "pane.png")
+                file.outputStream().use { picture.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+            }.getOrNull()
+            picture.recycle()
+            launch(Dispatchers.Main) {
+                if (uri == null) {
+                    showMessage("The picture couldn't be saved")
+                } else {
+                    startChooser(
+                        Intent(Intent.ACTION_SEND).setType("image/png").putExtra(Intent.EXTRA_STREAM, uri)
+                            .apply { clipData = ClipData.newRawUri(null, uri) }
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                    )
+                }
+            }
+        }
+    }
+
+    /** Copies the command that makes a shell mark its prompts, for prompt jumps and copying output. */
+    fun copyShellSetup() {
+        copy(shellSetupCommand(context.assets.open("prompt-marks.sh").use { it.readBytes() }))
+    }
+
     /** Copies the shell command that sets this server's computer up for agent chat. */
     fun copyHostSetup() {
         copy(hostSetupCommand(context.assets.open("compy.lua").use { it.readBytes() }))
@@ -226,9 +282,15 @@ class WorkspaceController(
             applySize(blockId)
         }
 
+        // A pinch sizes this pane alone. The newest hundred are kept, since panes come and go.
         override fun onFontSizeChanged(sizeSp: Float) {
-            app.updateSettings { it.copy(fontSizeSp = sizeSp) }
+            app.updateSettings { s ->
+                val sizes = (s.paneFontSizes - blockId) + (blockId to sizeSp)
+                s.copy(paneFontSizes = if (sizes.size > MAX_PANE_SIZES) sizes.entries.drop(sizes.size - MAX_PANE_SIZES).associate { it.toPair() } else sizes)
+            }
         }
+
+        override fun shareText(text: String) = share(text)
 
         override fun copyText(text: String) = copy(text)
         override fun clipboardText() = this@WorkspaceController.clipboardText()
@@ -298,6 +360,7 @@ class WorkspaceController(
 
     companion object {
         private const val MAX_TYPED = 64
+        private const val MAX_PANE_SIZES = 100
         private const val SIZE_DEBOUNCE_MS = 200L
 
         fun mousePayload(action: String, button: String?, col: Int, row: Int): JsonObject = buildJsonObject {

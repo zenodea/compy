@@ -158,8 +158,16 @@ fun CommandPalette(
         }
         add("Jump to previous prompt", "scroll back shell") { controller.focusedView()?.jumpPrompt(-1) }
         add("Jump to next prompt", "scroll forward shell") { controller.focusedView()?.jumpPrompt(1) }
+        add("Set up prompt jumps and copying output", "shell integration marks osc 133 zsh bash fish") {
+            controller.copyShellSetup()
+            onMessage("Copied a command. Paste it into a shell on the computer running Rex and press Enter.")
+        }
         add("Compose a message", "composer voice long", onCompose)
         focused?.let { block ->
+            add("Share a picture of this pane", "screenshot image send export") { controller.sharePicture(block) }
+            if (block in controller.app.settings.value.paneFontSizes) {
+                add("Reset this pane's text size", "font zoom pinch") { controller.resetFontSize(block) }
+            }
             add("Split right", "pane new") { connection.newSplit(session, block, horizontal = true, onError = onMessage) }
             add("Split down", "pane new") { connection.newSplit(session, block, horizontal = false, onError = onMessage) }
             if (paneCount > 1) add(if (zoomed) "Show all panes" else "Zoom pane", "maximize") { connection.zoomBlock(session, block, !zoomed) }

@@ -76,6 +76,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
@@ -1093,6 +1094,11 @@ fun TerminalPane(
     val chat = agent != null && controller.chatShown[blockId] == true
     val keyboard = LocalSoftwareKeyboardController.current
     val terminalLook = remember(settings) { settings.terminalLook() }
+    // A pane that is still connecting shows the color its terminal will have, not black.
+    val hostColors by controller.connection.hostTheme.collectAsStateWithLifecycle()
+    val emptyColor = (TerminalThemes.colors(settings.terminalTheme, scheme)?.background ?: hostColors?.background)
+        ?.takeIf { it != 0 } ?: scheme.surfaceContainerLow.toArgb()
+    val fontSize = settings.paneFontSizes[blockId] ?: settings.fontSizeSp
     var scrolledUp by remember(blockId) { mutableStateOf(false) }
     val ringColor by animateColorAsState(
         if (showFocusRing && focused) scheme.primary.copy(alpha = 0.75f) else Color.Transparent,
@@ -1112,7 +1118,8 @@ fun TerminalPane(
                 .clip(LocalPaneLook.current.shape),
             factory = { ctx ->
                 TerminalView(ctx) { app.fonts.value }.also { view ->
-                    view.fontSizeSp = settings.fontSizeSp
+                    view.fontSizeSp = fontSize
+                    view.emptyColor = emptyColor
                     view.host = controller.host(blockId) { latestTap.value() }
                     view.onScrolledUp = { scrolledUp = it }
                     view.bind(session)
@@ -1124,7 +1131,8 @@ fun TerminalPane(
                 view.topSpace = if (handleSpace) with(density) { look.handleSpace.toPx() } else 0f
                 view.keepSize = settings.sizeModes[controller.sessionId] == SizeMode.Keep
                 view.paneFocused = focused && interactive && !chat
-                view.fontSizeSp = settings.fontSizeSp
+                view.fontSizeSp = fontSize
+                view.emptyColor = emptyColor
                 view.look = terminalLook
                 view.tag.let { if (it !== fonts) { view.tag = fonts; view.fontsChanged() } }
             },

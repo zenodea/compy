@@ -1,5 +1,10 @@
 package dev.compy.ui
 
+import androidx.compose.material.icons.rounded.BookmarkBorder
+import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.Mic
+import android.speech.RecognizerIntent
+import android.content.Intent
 import androidx.compose.animation.AnimatedVisibility
 import dev.compy.system.uploadLabel
 import dev.compy.system.uploadFiles
@@ -99,6 +104,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -206,6 +212,13 @@ fun Workspace(
     }
     LaunchedEffect(foreground, state) {
         if (foreground && state == ConnectionState.Connected) controller.reapplySizes()
+    }
+    // A phone that dims in the middle of a long task hides the moment it finishes.
+    val statuses by connection.statuses.collectAsStateWithLifecycle()
+    val watching = settings.keepScreenOn && shownBlocks.any { statuses[it]?.isWorking == true }
+    DisposableEffect(watching) {
+        rootView.keepScreenOn = watching
+        onDispose { rootView.keepScreenOn = false }
     }
 
     val imeVisible = WindowInsets.isImeVisible
@@ -1171,6 +1184,15 @@ private fun ComposerSheet(controller: WorkspaceController, sendsEnter: Boolean, 
     var text by rememberSaveable { mutableStateOf("") }
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val focus = remember { FocusRequester() }
+    val settings by controller.app.settings.collectAsStateWithLifecycle()
+    var recentOpen by remember { mutableStateOf(false) }
+    var savedOpen by remember { mutableStateOf(false) }
+    val scheme = MaterialTheme.colorScheme
+    // Speaking a message: Android's own voice typing listens and hands back the words.
+    val voice = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val heard = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+        if (!heard.isNullOrBlank()) text = Composer.appended(text, heard)
+    }
     LaunchedEffect(Unit) { focus.requestFocus() }
     ModalBottomSheet(onDismissRequest = onClose, sheetState = sheet) {
         Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 16.dp).imePadding()) {
@@ -1181,20 +1203,114 @@ private fun ComposerSheet(controller: WorkspaceController, sendsEnter: Boolean, 
                 modifier = Modifier.fillMaxWidth().weight(1f, fill = false).heightIn(min = 140.dp).focusRequester(focus),
                 label = { Text("Message for this pane") },
             )
-            Spacer(Modifier.size(8.dp))
+            Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                RoundButton(Icons.Rounded.Mic, "Speak a message", size = 40.dp, filled = false, tint = scheme.onSurfaceVariant) {
+                    val listen = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                        .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    runCatching { voice.launch(listen) }.onFailure { controller.showMessage("This phone has no voice typing to use") }
+                }
+                Box {
+                    RoundButton(Icons.Rounded.History, "Messages you sent", size = 40.dp, filled = false, tint = scheme.onSurfaceVariant) {
+                        recentOpen = true
+                    }
+                    DropdownMenu(recentOpen, onDismissRequest = { recentOpen = false }) {
+                        if (settings.composerHistory.isEmpty()) {
+                            DropdownMenuItem(text = { Text("Messages you send show here") }, enabled = false, onClick = {})
+                        }
+                        settings.composerHistory.forEach { message ->
+                            DropdownMenuItem(
+                                text = { Text(Composer.preview(message), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                onClick = {
+                                    recentOpen = false
+                                    text = message
+                                },
+                            )
+                        }
+                        if (settings.composerHistory.isNotEmpty()) {
+                            DropdownMenuItem(
+                                text = { Text("Forget these", color = scheme.error) },
+                                onClick = {
+                                    recentOpen = false
+                                    controller.app.updateSettings { it.copy(composerHistory = emptyList()) }
+                                },
+                            )
+                        }
+                    }
+                }
+                Box {
+                    RoundButton(Icons.Rounded.BookmarkBorder, "Saved messages", size = 40.dp, filled = false, tint = scheme.onSurfaceVariant) {
+                        savedOpen = true
+                    }
+                    DropdownMenu(savedOpen, onDismissRequest = { savedOpen = false }) {
+                        val saved = text.isNotBlank() && text in settings.snippets
+                        DropdownMenuItem(
+                            text = { Text(if (saved) "Saved" else "Save this message") },
+                            enabled = text.isNotBlank() && !saved,
+                            leadingIcon = { Icon(Icons.Rounded.Add, null) },
+                            onClick = {
+                                val kept = text
+                                savedOpen = false
+                                controller.app.updateSettings { it.copy(snippets = Composer.remembered(it.snippets, kept, Composer.MAX_SAVED)) }
+                            },
+                        )
+                        settings.snippets.forEach { snippet ->
+                            DropdownMenuItem(
+                                text = { Text(Composer.preview(snippet), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                trailingIcon = {
+                                    RoundButton(Icons.Rounded.Close, "Remove", size = 32.dp, filled = false, tint = scheme.onSurfaceVariant) {
+                                        controller.app.updateSettings { it.copy(snippets = it.snippets - snippet) }
+                                    }
+                                },
+                                onClick = {
+                                    savedOpen = false
+                                    text = Composer.appended(text, snippet)
+                                },
+                            )
+                        }
+                    }
+                }
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Switch(sendsEnter, { value -> controller.app.updateSettings { it.copy(composerSendsEnter = value) } })
                 Text("Press Enter after sending", Modifier.padding(start = 8.dp).weight(1f), style = MaterialTheme.typography.bodyMedium)
                 Button(
                     enabled = text.isNotEmpty(),
                     onClick = {
-                        controller.paste(text)
+                        val sent = text
+                        controller.paste(sent)
                         if (sendsEnter) controller.sendKey(RexKey.ENTER)
+                        controller.app.updateSettings { it.copy(composerHistory = Composer.remembered(it.composerHistory, sent, Composer.MAX_RECENT)) }
                         onClose()
                     },
                 ) { Text("Send") }
             }
         }
+    }
+}
+
+/** How the composer keeps and shows the messages it remembers. */
+internal object Composer {
+    const val MAX_RECENT = 30
+    const val MAX_SAVED = 50
+
+    /** [list] with [message] first, once, and no more than [limit] long. Blank messages aren't kept. */
+    fun remembered(list: List<String>, message: String, limit: Int): List<String> {
+        if (message.isBlank()) return list
+        return (listOf(message) + list.filter { it != message }).take(limit)
+    }
+
+    /** One line that stands for a message in a menu. */
+    fun preview(message: String): String {
+        val line = message.trim().lineSequence().firstOrNull().orEmpty()
+        val more = message.trim().contains('\n')
+        return if (line.length > 60) line.take(59) + "…" else if (more) "$line …" else line
+    }
+
+    /** [text] with [more] added after it, on the same line and a space apart. */
+    fun appended(text: String, more: String): String = when {
+        text.isEmpty() -> more
+        text.last().isWhitespace() -> text + more
+        else -> "$text $more"
     }
 }
 

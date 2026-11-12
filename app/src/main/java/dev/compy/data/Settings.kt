@@ -55,6 +55,8 @@ data class Settings(
     val paneLayout: String = "relaxed",
     val terminalTheme: String = "rex",
     val fontSizeSp: Float = 13f,
+    /** Text sizes set by pinching a pane, by block. A pane without one uses [fontSizeSp]. */
+    val paneFontSizes: Map<String, Float> = emptyMap(),
     val customFontPath: String? = null,
     /** Moves text colors that are too close to their background until they can be read. */
     val improveContrast: Boolean = true,
@@ -72,6 +74,12 @@ data class Settings(
     val tapMovesCursor: Boolean = true,
     /** Ask before pasting several lines into a program that would run each as it arrives. */
     val pasteWarning: Boolean = true,
+    /** Keep the screen on while an agent in a pane on screen is working. */
+    val keepScreenOn: Boolean = false,
+    /** Messages sent from the composer, newest first, to send again. */
+    val composerHistory: List<String> = emptyList(),
+    /** Messages saved in the composer to use again. */
+    val snippets: List<String> = emptyList(),
     val biometricLock: Boolean = true,
     val blockScreenshots: Boolean = false,
     val keyBarPages: List<List<KeyDef>> = DefaultKeyBar.pages,

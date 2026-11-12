@@ -39,6 +39,17 @@
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize" />
 
+        <!-- Hands a picture of a pane to the app the person shares it with, and nothing else. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/shared_files" />
+        </provider>
+
         <!-- One launcher entry per app icon. Only the chosen one is enabled, in AppIcons. -->
         <activity-alias
             android:name=".IconRefined"
