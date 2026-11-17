@@ -300,6 +300,49 @@ fun shortFolder(pwd: String?): String? {
     return if (path == "/root") "~" else path
 }
 
+/**
+ * A reported directory as a whole path on its host: what a shell reports is a URL such as
+ * `file://host/Users/me/my%20work`, read here without the host and with `%20` and the like turned
+ * back into characters. Null when there is no usable path in it.
+ */
+fun folderPath(pwd: String?): String? {
+    if (pwd.isNullOrBlank()) return null
+    var path: String = pwd
+    if (path.startsWith("file://")) {
+        path = path.removePrefix("file://")
+        if ('/' !in path) return null
+        path = path.substring(path.indexOf('/'))
+        path = runCatching { java.net.URLDecoder.decode(path.replace("+", "%2B"), "UTF-8") }.getOrDefault(path)
+    }
+    return path.takeIf { it.startsWith("/") }
+}
+
+/** One entry of a folder on a host. */
+data class DirEntry(val name: String, val isFile: Boolean)
+
+/** A folder on a host: its whole path, and its folders ahead of its files, each in name order. */
+data class DirListing(val path: String, val entries: List<DirEntry>) {
+    /** The path of an entry, or of the folder above for `..` */
+    fun child(name: String): String = when {
+        name == ".." -> path.trimEnd('/').substringBeforeLast('/').ifEmpty { "/" }
+        path.endsWith("/") -> path + name
+        else -> "$path/$name"
+    }
+}
+
+internal fun parseDirListing(e: JsonElement?): DirListing? {
+    val o = e.obj() ?: return null
+    val path = o["path"].str()?.takeIf { it.isNotEmpty() } ?: return null
+    val entries = o["entries"].arr().orEmpty().mapNotNull { entry ->
+        val item = entry.obj() ?: return@mapNotNull null
+        DirEntry(item["name"].str() ?: return@mapNotNull null, item["file"].bool() == true)
+    }
+    return DirListing(path, entries.sortedWith(compareBy<DirEntry> { it.isFile }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }))
+}
+
+/** A path as a shell takes it as one word, whatever is in it. */
+fun shellQuoted(path: String): String = "'" + path.replace("'", "'\\''") + "'"
+
 /** The last part of a reported directory, from a file:// URL or a plain path. */
 fun folderName(pwd: String?): String? {
     if (pwd.isNullOrBlank()) return null

@@ -163,7 +163,19 @@ fun CommandPalette(
             onMessage("Copied a command. Paste it into a shell on the computer running Rex and press Enter.")
         }
         add("Compose a message", "composer voice long", onCompose)
+        add("Go to anything", "jump switch session window tab pane folder recent") { controller.sheet = WorkspaceController.Sheet.GoTo }
         focused?.let { block ->
+            add("Go to a folder", "directory cd browse change") { controller.sheet = WorkspaceController.Sheet.Browse(block, insert = false) }
+            add("Insert a path", "file folder browse type") { controller.sheet = WorkspaceController.Sheet.Browse(block, insert = true) }
+            add("Paste", "clipboard picture image screenshot file attach upload") { controller.pasteClipboard(block) }
+            add("Rename pane", "label name") { controller.sheet = WorkspaceController.Sheet.RenamePane(block) }
+            add("Move pane to another window", "tab") { controller.sheet = WorkspaceController.Sheet.MoveToWindow(block) }
+            add("Move pane to a new window", "tab") { connection.placeInNewWindow(session, block, onMessage) }
+            if (paneCount > 1) {
+                add("Close other panes", "kill only") {
+                    window?.blocks?.filter { it.id != block }?.forEach { connection.closeBlock(session, it.id, onMessage) }
+                }
+            }
             add("Save this pane to read offline", "history keep archive download export later") { controller.savePane(block) }
             add("Share a picture of this pane", "screenshot image send export") { controller.sharePicture(block) }
             if (block in controller.app.settings.value.paneFontSizes) {
@@ -171,7 +183,7 @@ fun CommandPalette(
             }
             add("Split right", "pane new") { connection.newSplit(session, block, horizontal = true, onError = onMessage) }
             add("Split down", "pane new") { connection.newSplit(session, block, horizontal = false, onError = onMessage) }
-            if (paneCount > 1) add(if (zoomed) "Show all panes" else "Zoom pane", "maximize") { connection.zoomBlock(session, block, !zoomed) }
+            if (paneCount > 1) add(if (zoomed) "Show all panes" else "Zoom pane", "maximize one at a time swipe fill screen") { controller.toggleZoom(window) }
             add("Close pane", "kill") { connection.closeBlock(session, block, onMessage) }
         }
         if ((window?.tiledLayer?.blocks?.size ?: 0) > 1) add("Arrange panes", "move swap layout", onArrange)
@@ -316,6 +328,8 @@ fun FindBar(controller: WorkspaceController, onClose: () -> Unit) {
     fun step(older: Boolean) {
         if (total > 0) index = view?.searchStep(older) ?: -1
     }
+    // A key bound on the host to the next or previous match steps the bar as its arrows do.
+    LaunchedEffect(Unit) { controller.findSteps.collect { step(it) } }
     Row(
         Modifier
             .fillMaxWidth()

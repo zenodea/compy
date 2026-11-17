@@ -84,11 +84,17 @@ data class Settings(
     val composerHistory: List<String> = emptyList(),
     /** Messages saved in the composer to use again. */
     val snippets: List<String> = emptyList(),
+    /** Folders gone to with Go to Directory, newest first, to go to again. */
+    val recentFolders: List<String> = emptyList(),
+    /** The command that opens a file in an editor on the host, from a file's preview. */
+    val editorCommand: String = "nvim",
     val biometricLock: Boolean = true,
     val blockScreenshots: Boolean = false,
     val keyBarPages: List<List<KeyDef>> = DefaultKeyBar.pages,
     val sizeModes: Map<String, SizeMode> = emptyMap(),
     val collapsedSessions: Set<String> = emptySet(),
+    /** Sessions shown one pane at a time, each filling the screen. Only Compy sees this. */
+    val zoomedSessions: Set<String> = emptySet(),
     val activityMode: Boolean = false,
     val composerSendsEnter: Boolean = true,
     /** Stay connected in the background and notify when an agent needs attention. */
@@ -102,6 +108,8 @@ data class Settings(
 /** The most entries kept of anything remembered per pane, session or server. */
 const val MAX_REMEMBERED = 200
 
+const val MAX_RECENT_FOLDERS = 12
+
 private fun <K, V> Map<K, V>.newest(limit: Int): Map<K, V> = if (size <= limit) this else entries.drop(size - limit).associate { it.toPair() }
 private fun <T> Set<T>.newest(limit: Int): Set<T> = if (size <= limit) this else drop(size - limit).toSet()
 
@@ -111,17 +119,20 @@ private fun <T> Set<T>.newest(limit: Int): Set<T> = if (size <= limit) this else
  * remembered about the ones long gone would otherwise stay in the settings file for good.
  */
 fun Settings.bounded(): Settings {
-    val over = sizeModes.size > MAX_REMEMBERED || collapsedSessions.size > MAX_REMEMBERED || paneFontSizes.size > MAX_REMEMBERED ||
-        chatPanes.size > MAX_REMEMBERED || hostThemes.size > MAX_REMEMBERED || composerHistory.size > 30 || snippets.size > 50
+    val over = sizeModes.size > MAX_REMEMBERED || collapsedSessions.size > MAX_REMEMBERED || zoomedSessions.size > MAX_REMEMBERED || paneFontSizes.size > MAX_REMEMBERED ||
+        chatPanes.size > MAX_REMEMBERED || hostThemes.size > MAX_REMEMBERED || composerHistory.size > 30 || snippets.size > 50 ||
+        recentFolders.size > MAX_RECENT_FOLDERS
     if (!over) return this
     return copy(
         sizeModes = sizeModes.newest(MAX_REMEMBERED),
         collapsedSessions = collapsedSessions.newest(MAX_REMEMBERED),
+        zoomedSessions = zoomedSessions.newest(MAX_REMEMBERED),
         paneFontSizes = paneFontSizes.newest(MAX_REMEMBERED),
         chatPanes = chatPanes.newest(MAX_REMEMBERED),
         hostThemes = hostThemes.newest(MAX_REMEMBERED),
         composerHistory = composerHistory.take(30),
         snippets = snippets.take(50),
+        recentFolders = recentFolders.take(MAX_RECENT_FOLDERS),
     )
 }
 

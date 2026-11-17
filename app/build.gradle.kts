@@ -20,8 +20,8 @@ android {
         applicationId = "dev.compy"
         minSdk = 34
         targetSdk = 36
-        versionCode = 24
-        versionName = "0.2.19"
+        versionCode = 25
+        versionName = "0.2.20"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         externalNativeBuild {
             cmake {

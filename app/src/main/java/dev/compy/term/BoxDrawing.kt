@@ -61,8 +61,25 @@ internal object BoxDrawing {
         in 0x2580..0x259F -> true
         in 0x2800..0x28FF -> true
         in 0xE0B0..0xE0B3 -> true
+        in 0x1FB00..0x1FB3B -> true
         else -> false
     }
+
+    /**
+     * Which sixths of its cell a sextant fills, for U+1FB00 to U+1FB3B: bit 0 the upper left,
+     * 1 the upper right, 2 the middle left, 3 the middle right, 4 the lower left and 5 the lower
+     * right. Unicode numbers them by this pattern, and leaves out the two that are already the
+     * left and right half blocks.
+     */
+    internal fun sextantBits(cp: Int): Int {
+        var bits = cp - 0x1FB00 + 1
+        if (bits >= LEFT_HALF) bits++
+        if (bits >= RIGHT_HALF) bits++
+        return bits
+    }
+
+    private const val LEFT_HALF = 0b010101
+    private const val RIGHT_HALF = 0b101010
 
     // Straight edges are filled without smoothing, so they land on whole pixels and neighbouring
     // cells join with no seam. Curves and slopes are smoothed.
@@ -81,6 +98,7 @@ internal object BoxDrawing {
             in 0x2580..0x259F -> block(canvas, cp, x, y, w, h)
             in 0x2800..0x28FF -> braille(canvas, cp, x, y, w, h)
             in 0xE0B0..0xE0B3 -> powerline(canvas, cp, x, y, w, h, thin)
+            in 0x1FB00..0x1FB3B -> sextant(canvas, cp, x, y, w, h)
             else -> {
                 val dashes = dashCount(cp)
                 val segs = table[cp] ?: return
@@ -285,6 +303,33 @@ internal object BoxDrawing {
                 if (quarters and 2 != 0) part(0f, 0.5f, 0.5f, 1f)
                 if (quarters and 1 != 0) part(0.5f, 0.5f, 1f, 1f)
             }
+        }
+    }
+
+    /**
+     * Sextants: the cell as two columns of three, which programs draw pictures and charts with.
+     * Each sixth ends on the same whole pixels as its neighbours, so a picture has no gaps.
+     */
+    private fun sextant(canvas: Canvas, cp: Int, x: Float, y: Float, w: Float, h: Float) {
+        val bits = sextantBits(cp)
+        val middle = x + Math.round(w / 2f)
+        val first = y + Math.round(h / 3f)
+        val second = y + Math.round(h * 2f / 3f)
+        for (i in 0 until 6) {
+            if (bits and (1 shl i) == 0) continue
+            val left = if (i % 2 == 0) x else middle
+            val right = if (i % 2 == 0) middle else x + w
+            val top = when (i / 2) {
+                0 -> y
+                1 -> first
+                else -> second
+            }
+            val bottom = when (i / 2) {
+                0 -> first
+                1 -> second
+                else -> y + h
+            }
+            canvas.drawRect(left, top, right, bottom, fill)
         }
     }
 

@@ -34,6 +34,8 @@ class RexControl(
     private val clientVersion: String,
     private val onEvent: (type: String, payload: JsonObject?) -> Unit,
     private val onClosed: (reason: String, code: Int) -> Unit,
+    /** The newest API revision to ask for. The server picks the newest one both sides know. */
+    private val apiRevision: Int = API_REVISION,
 ) {
     private val pending = ConcurrentHashMap<String, CompletableDeferred<JsonElement?>>()
     private val nextId = AtomicLong(1)
@@ -97,7 +99,7 @@ class RexControl(
         override fun onOpen(webSocket: WebSocket, response: Response) {
             val hello = buildJsonObject {
                 put("type", "hello")
-                put("api_revision", API_REVISION)
+                put("api_revision", apiRevision)
                 if (token != null) put("reconnect_token", token)
                 put("client", buildJsonObject {
                     put("kind", "app")
@@ -180,7 +182,7 @@ class RexControl(
 
     companion object {
         const val SUBPROTOCOL = "rex.control.v1"
-        /** The newest revision Compy speaks. The server picks the newest one both sides know. */
+        /** The newest revision Compy's main connection speaks. Reading a file asks for a later one, on a connection of its own. */
         const val API_REVISION = 11
         /** Older servers lack things Compy relies on, so they get a warning. */
         const val MIN_API_REVISION = 10

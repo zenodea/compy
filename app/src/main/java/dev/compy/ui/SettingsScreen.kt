@@ -250,6 +250,7 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
     val context = LocalContext.current
     var themeMenu by remember { mutableStateOf(false) }
     var showLicenses by remember { mutableStateOf(false) }
+    var editingEditor by remember { mutableStateOf(false) }
     val update: ((Settings) -> Settings) -> Unit = { app.updateSettings(it) }
     // Counts returns to this screen, so what Android allows is read again after a trip to its settings.
     var resumes by remember { mutableIntStateOf(0) }
@@ -413,6 +414,7 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
                         update { it.copy(pasteWarning = on) }
                     }
                     Row2("Key bar", "Reorder keys, add your own and arrange pages", onClick = onEditKeyBar)
+                    Row2("Editor command", "Opens a file from its preview, in a new pane on the host: ${settings.editorCommand}", onClick = { editingEditor = true })
                 }
             }
             item {
@@ -434,6 +436,12 @@ private fun SettingsList(app: AppState, onBack: () -> Unit, onEditKeyBar: () -> 
                     Row2("Open source licenses", onClick = { showLicenses = true })
                 }
             }
+        }
+    }
+    if (editingEditor) {
+        RenameDialog("Editor command", settings.editorCommand, onDismiss = { editingEditor = false }) { command ->
+            editingEditor = false
+            update { it.copy(editorCommand = command) }
         }
     }
     if (showLicenses) {

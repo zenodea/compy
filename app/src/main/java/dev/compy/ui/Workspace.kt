@@ -138,6 +138,8 @@ import dev.compy.rex.ServerConnection
 import dev.compy.rex.SessionView
 import dev.compy.rex.WindowView
 import dev.compy.rex.asWindow
+import dev.compy.rex.paneUnder
+import dev.compy.rex.tabMoveTarget
 
 /** The right-hand side of the app: one session's panes, tabs, keys and actions. */
 @OptIn(ExperimentalLayoutApi::class)
@@ -153,6 +155,11 @@ fun Workspace(
     onShowSidebar: () -> Unit,
     /** Opens the panes kept on the phone to read offline. */
     onOpenSaved: () -> Unit = {},
+    /** Shows the session list, or hides it again where it sits beside the panes. */
+    onToggleSidebar: () -> Unit = onShowSidebar,
+    onOpenSettings: () -> Unit = {},
+    onOpenBoard: () -> Unit = {},
+    onAddServer: () -> Unit = {},
     onMessage: (String) -> Unit,
 ) {
     val context = LocalContext.current
@@ -164,7 +171,8 @@ fun Workspace(
     val settings by app.settings.collectAsStateWithLifecycle()
     val titles by connection.titles.collectAsStateWithLifecycle()
     val view = views[sessionId]
-    val window = view?.activeWindow
+    // The window as the phone shows it: zoomed here, one pane fills it, whatever the server's layout says.
+    val window = view?.activeWindow?.let { controller.shown(it) }
     val detachedPanes by connection.detached.collectAsStateWithLifecycle()
     LaunchedEffect(view, detachedPanes) {
         // Not before the layout has loaded, when every pane would look closed.
@@ -189,6 +197,25 @@ fun Workspace(
             showDetached = true
             app.showDetached(null)
         }
+    }
+    // What a key bound on the host, or one of its Lua actions, asks this app to do with the session shown.
+    val ui = rememberUpdated(
+        WorkspaceUi(
+            palette = { palette = true },
+            find = { finding = true },
+            overview = { overview = !overview },
+            sidebar = onToggleSidebar,
+            board = onOpenBoard,
+            settings = onOpenSettings,
+            addHost = onAddServer,
+        ),
+    )
+    DisposableEffect(connection, controller) {
+        val performer = { session: String?, command: dev.compy.rex.ClientCommand ->
+            (session == null || session == sessionId) && perform(command, controller, ui.value)
+        }
+        connection.performer = performer
+        onDispose { if (connection.performer === performer) connection.performer = null }
     }
     val shownBlocks = window?.shownBlocks?.map { it.id }.orEmpty()
     val minimized = window?.minimizedLayers.orEmpty()
@@ -428,6 +455,32 @@ fun Workspace(
                                 val placeable = measurable.measure(constraints.offset(-inset * 2, -inset * 2))
                                 layout(placeable.width + inset * 2, placeable.height + inset * 2) { placeable.place(inset, inset) }
                             }
+                            .twoFingerGestures(
+                                enabled = window != null && overviewClosed && !arranging,
+                                onSwipe = { side ->
+                                    val shown = connection.views.value[sessionId]?.activeWindow
+                                    val went = shown != null && controller.goToward(shown, side)
+                                    // A tick for a pane reached, and a duller one at the window's edge.
+                                    rootView.performHapticFeedback(if (went) HapticFeedbackConstants.SEGMENT_TICK else HapticFeedbackConstants.REJECT)
+                                },
+                                onTap = { at ->
+                                    val shown = connection.views.value[sessionId]?.activeWindow
+                                    when {
+                                        shown == null -> Unit
+                                        shown.zoomedBlockId != null || controller.zoomedPane(shown) != null -> {
+                                            controller.toggleZoom(shown)
+                                            rootView.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                                        }
+                                        shown.shownBlocks.size > 1 -> {
+                                            // The pane under the fingers is the one that fills the screen.
+                                            shown.paneUnder(at.x, at.y)?.let { controller.focus(it) }
+                                            controller.zoom(true)
+                                            rootView.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                                        }
+                                        else -> latestMessage.value("This window has one pane, so there is nothing to zoom")
+                                    }
+                                },
+                            )
                             .onGloballyPositioned { areaBounds = it.boundsInRoot() }
                             .graphicsLayer {
                                 val p = overviewProgress.value
@@ -446,6 +499,20 @@ fun Workspace(
                                 }
                             },
                     ) {
+                        // While the phone shows one pane at a time: where it is among the others.
+                        val layout = view?.activeWindow?.takeIf { it.zoomedBlockId == null }
+                        val filling = layout?.let { controller.zoomedPane(it) }
+                        if (layout != null && filling != null && overviewClosed && !arranging) {
+                            val programs by connection.programs.collectAsStateWithLifecycle()
+                            // An agent's pane has its chat button in this corner.
+                            val agent = ProgramNames.candidates(statuses[filling]?.app, programs[filling]).any { it in CHAT_AGENTS }
+                            PaneMap(
+                                layout, filling,
+                                titles = layout.blocks.associate { it.id to BoardRules.title(statuses[it.id], programs[it.id], titles[it.id]) },
+                                onPick = { controller.focus(it) },
+                                modifier = Modifier.align(Alignment.TopEnd).zIndex(2f).padding(top = 8.dp, end = if (agent) 50.dp else 8.dp),
+                            )
+                        }
                         if (window == null) {
                             Text(
                                 if (view == null) "Loading…" else "This session has no windows",
@@ -602,6 +669,50 @@ fun Workspace(
     if (composer) {
         ComposerSheet(controller, settings.composerSendsEnter, onClose = { composer = false })
     }
+    when (val sheet = controller.sheet) {
+        null -> Unit
+        WorkspaceController.Sheet.GoTo -> GoToAnything(controller, onClose = { controller.sheet = null })
+        is WorkspaceController.Sheet.Browse -> PathBrowser(controller, sheet.blockId, sheet.insert, onClose = { controller.sheet = null })
+        is WorkspaceController.Sheet.MoveToWindow -> view?.let { shown ->
+            WindowPicker(
+                shown, sheet.blockId, titles,
+                onPick = {
+                    controller.sheet = null
+                    controller.moveToWindow(sheet.blockId, it)
+                },
+                onClose = { controller.sheet = null },
+            )
+        }
+        is WorkspaceController.Sheet.RenamePane -> RenameDialog(
+            "Rename pane",
+            view?.windows?.firstNotNullOfOrNull { w -> w.blocks.firstOrNull { it.id == sheet.blockId } }?.label.orEmpty(),
+            onDismiss = { controller.sheet = null },
+        ) { label ->
+            controller.sheet = null
+            connection.renameBlock(sessionId, sheet.blockId, label, onMessage)
+        }
+        WorkspaceController.Sheet.RenameWindow -> RenameDialog("Rename window", window?.label.orEmpty(), onDismiss = { controller.sheet = null }) { label ->
+            controller.sheet = null
+            window?.let { connection.renameWindow(sessionId, it.id, label, onMessage) }
+        }
+        WorkspaceController.Sheet.RenameSession -> RenameDialog("Rename session", view?.label.orEmpty(), onDismiss = { controller.sheet = null }) { label ->
+            controller.sheet = null
+            connection.renameSession(sessionId, label, onMessage)
+        }
+        WorkspaceController.Sheet.EndSession -> AlertDialog(
+            onDismissRequest = { controller.sheet = null },
+            title = { Text("End this session?") },
+            text = { Text("This closes every window in \"${view?.label.orEmpty()}\" and stops the programs running in them.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    controller.sheet = null
+                    connection.destroySession(sessionId, onMessage)
+                }) { Text("End session") }
+            },
+            dismissButton = { TextButton(onClick = { controller.sheet = null }) { Text("Cancel") } },
+        )
+    }
+    controller.peek?.let { peek -> FilePeek(controller, peek, onClose = { controller.peek = null }) }
     if (palette) {
         CommandPalette(
             controller, window,
@@ -821,7 +932,7 @@ private fun ActionsMenu(
                 enabled = focused != null && paneCount > 1,
                 onClick = {
                     open = false
-                    focused?.let { connection.zoomBlock(sessionId, it, !zoomed) }
+                    controller.toggleZoom(window)
                 },
             )
             DropdownMenuItem(
@@ -891,6 +1002,14 @@ private fun ActionsMenu(
                 )
             }
             DropdownMenuItem(
+                text = { Text("Move to window…") },
+                enabled = focused != null,
+                onClick = {
+                    open = false
+                    focused?.let { controller.sheet = WorkspaceController.Sheet.MoveToWindow(it) }
+                },
+            )
+            DropdownMenuItem(
                 text = { Text("Detach pane") },
                 enabled = focused != null,
                 onClick = {
@@ -917,6 +1036,14 @@ private fun ActionsMenu(
                 },
             )
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            DropdownMenuItem(
+                text = { Text("Rename pane") },
+                enabled = focused != null,
+                onClick = {
+                    open = false
+                    focused?.let { controller.sheet = WorkspaceController.Sheet.RenamePane(it) }
+                },
+            )
             DropdownMenuItem(
                 text = { Text("Rename window") },
                 enabled = window != null,
@@ -1044,6 +1171,13 @@ private fun WindowPills(controller: WorkspaceController, view: SessionView, onMe
                             menuFor = null
                             renaming = window
                         })
+                        listOf(false to "Move left", true to "Move right").forEach { (forward, name) ->
+                            val move = view.tabMoveTarget(window.id, forward)
+                            DropdownMenuItem(text = { Text(name) }, enabled = move != null, onClick = {
+                                menuFor = null
+                                move?.let { connection.moveWindow(controller.sessionId, window.id, it.beforeWindowId, onMessage) }
+                            })
+                        }
                         DropdownMenuItem(text = { Text("Close window") }, onClick = {
                             menuFor = null
                             connection.closeWindow(controller.sessionId, window.id, onMessage)

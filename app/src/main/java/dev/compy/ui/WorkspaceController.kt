@@ -16,6 +16,7 @@ import dev.compy.data.SizeMode
 import dev.compy.rex.RexKey
 import dev.compy.rex.ServerConnection
 import dev.compy.rex.TranscriptFeed
+import dev.compy.rex.neighbor
 import dev.compy.rex.hostSetupCommand
 import dev.compy.rex.shellSetupCommand
 import dev.compy.term.TerminalView
@@ -165,6 +166,134 @@ class WorkspaceController(
         connection.paste(sessionId, paste.blockId, paste.text)
     }
 
+    /**
+     * Pastes whatever the clipboard holds into a pane. Text goes in as text. A picture or a file,
+     * such as a screenshot just copied, is sent to the pane's machine instead, and Rex types the
+     * path it arrives at, which is how a coding agent is handed an attachment.
+     */
+    fun pasteClipboard(blockId: String? = target()) {
+        val block = blockId ?: return
+        val clip = runCatching { context.getSystemService(ClipboardManager::class.java).primaryClip }.getOrNull()
+        // Only what is a file on the phone. A copied web address can arrive as a link too, and is text.
+        val uris = clip?.let { c -> (0 until c.itemCount).mapNotNull { c.getItemAt(it).uri } }.orEmpty()
+            .filter { it.scheme == "content" || it.scheme == "file" }
+        if (uris.isEmpty()) {
+            clipboardText()?.takeIf { it.isNotEmpty() }?.let { pasteChecked(it, block) }
+            return
+        }
+        connection.act({ showMessage(it) }) {
+            val files = dev.compy.system.uploadFiles(context, uris)
+            showMessage("Uploading ${dev.compy.system.uploadLabel(files)}…")
+            connection.upload(sessionId, block, files)
+            showMessage("Uploaded ${dev.compy.system.uploadLabel(files)}")
+        }
+    }
+
+    /** Changes a pane's shell to a folder, or types a path into it, quoted so it stays one word. */
+    fun usePath(blockId: String, path: String, insert: Boolean) {
+        val quoted = dev.compy.rex.shellQuoted(path)
+        connection.writeText(sessionId, blockId, if (insert) "$quoted " else "cd $quoted\r") { showMessage(it) }
+        if (!insert) {
+            app.updateSettings { s -> s.copy(recentFolders = (listOf(path) + (s.recentFolders - path)).take(dev.compy.data.MAX_RECENT_FOLDERS)) }
+        }
+    }
+
+    /**
+     * Whether this session shows one pane at a time, filling the screen, with the others a swipe
+     * away. Only the phone's view changes: the layout on the server stays as it is, so other
+     * devices still see every pane. Kept with the settings, and here so a tap answers at once.
+     */
+    var zoomed by mutableStateOf(sessionId in app.settings.value.zoomedSessions)
+        private set
+
+    fun zoom(on: Boolean) {
+        zoomed = on
+        app.updateSettings { it.copy(zoomedSessions = if (on) (it.zoomedSessions - sessionId) + sessionId else it.zoomedSessions - sessionId) }
+    }
+
+    /** The pane that fills the screen while this session is zoomed, or null when every pane shows. */
+    fun zoomedPane(window: dev.compy.rex.WindowView): String? {
+        if (!zoomed || window.shownBlocks.size < 2) return null
+        return focusedBlockId?.takeIf { id -> window.shownBlocks.any { it.id == id } }
+            ?: window.focusedBlockId?.takeIf { id -> window.shownBlocks.any { it.id == id } }
+            ?: window.shownBlocks.first().id
+    }
+
+    /**
+     * A window as this screen shows it: with the phone's own zoomed pane standing where Rex's
+     * would, so everything that draws a zoomed window draws this one the same way.
+     */
+    fun shown(window: dev.compy.rex.WindowView): dev.compy.rex.WindowView =
+        if (window.zoomedBlockId != null) window else window.copy(zoomedBlockId = zoomedPane(window))
+
+    /** Shows every pane again, or only the one with the keyboard. A zoom made on another device is undone as well. */
+    fun toggleZoom(window: dev.compy.rex.WindowView?) {
+        val elsewhere = window?.zoomedBlockId
+        if (elsewhere != null) {
+            connection.zoomBlock(sessionId, elsewhere, false)
+            zoom(false)
+        } else {
+            zoom(!zoomed)
+        }
+    }
+
+    fun focus(blockId: String) {
+        focusedBlockId = blockId
+        connection.focusBlock(sessionId, blockId)
+        connection.clearAttention(blockId)
+        app.notifier.cancel(blockId)
+    }
+
+    /** Goes to the pane on a side of the one with the keyboard. False when there is none there. */
+    fun goToward(window: dev.compy.rex.WindowView, side: dev.compy.rex.Side): Boolean {
+        val from = focusedBlockId ?: return false
+        focus(window.neighbor(from, side) ?: return false)
+        return true
+    }
+
+    /** Something shown over the session that asks one thing of the person. */
+    sealed interface Sheet {
+        /** Every session, window and pane, to go to one by name. */
+        data object GoTo : Sheet
+        /** The folders on a pane's machine, to change to one or to type a path. */
+        data class Browse(val blockId: String, val insert: Boolean) : Sheet
+        /** The session's other windows, to move a pane into one. */
+        data class MoveToWindow(val blockId: String) : Sheet
+        data class RenamePane(val blockId: String) : Sheet
+        data object RenameWindow : Sheet
+        data object RenameSession : Sheet
+        data object EndSession : Sheet
+    }
+
+    var sheet by mutableStateOf<Sheet?>(null)
+
+    /** Puts a pane beside the first pane in another window's layout. */
+    fun moveToWindow(blockId: String, window: dev.compy.rex.WindowView) {
+        val anchor = window.tiledLayer?.blocks?.firstOrNull { it.id != blockId }?.id
+        if (anchor == null) {
+            showMessage("That window has no pane in its layout to move beside")
+            return
+        }
+        connection.moveBlock(sessionId, blockId, anchor, horizontal = true, before = false) { showMessage(it) }
+    }
+
+    /** Gives a pane a larger or smaller text size of its own, as a pinch does. */
+    fun stepFontSize(blockId: String, step: Int) {
+        app.updateSettings { s ->
+            val size = ((s.paneFontSizes[blockId] ?: s.fontSizeSp) + step).coerceIn(6f, 32f)
+            val sizes = (s.paneFontSizes - blockId) + (blockId to size)
+            s.copy(paneFontSizes = if (sizes.size > MAX_PANE_SIZES) sizes.entries.drop(sizes.size - MAX_PANE_SIZES).associate { it.toPair() } else sizes)
+        }
+    }
+
+    /** A file on a pane's machine that the person asked to see. */
+    data class Peek(val blockId: String, val path: String, val line: Int)
+
+    var peek by mutableStateOf<Peek?>(null)
+
+    /** Steps the find bar to an older or newer match, when a key bound to that is pressed. */
+    val findSteps = kotlinx.coroutines.flow.MutableSharedFlow<Boolean>(extraBufferCapacity = 4)
+
     fun clipboardText(): String? {
         val clip = context.getSystemService(ClipboardManager::class.java).primaryClip ?: return null
         if (clip.itemCount == 0) return null
@@ -301,7 +430,7 @@ class WorkspaceController(
                 val character = def.key.takeIf { it.startsWith("key_") || it.startsWith("digit_") }?.substringAfter('_')
                 sendKey(RexKey(def.key, mods, unshifted = character?.firstOrNull()?.code ?: 0))
             }
-            "paste" -> clipboardText()?.let { pasteChecked(it) }
+            "paste" -> pasteClipboard()
             "prompt" -> focusedView()?.jumpPrompt(def.key.toIntOrNull() ?: return)
         }
     }
@@ -315,6 +444,11 @@ class WorkspaceController(
         override fun sendKey(key: RexKey) = connection.sendKey(sessionId, blockId, key)
         override fun sendText(text: String) = this@WorkspaceController.sendText(text, blockId)
         override fun paste(text: String) = pasteChecked(text, blockId)
+        override fun pasteClipboard() = this@WorkspaceController.pasteClipboard(blockId)
+
+        override fun openPath(path: String, line: Int) {
+            peek = Peek(blockId, path, line)
+        }
 
         override fun sendMouse(action: String, button: String?, col: Int, row: Int) {
             connection.sendMouse(sessionId, blockId, mousePayload(action, button, col, row))

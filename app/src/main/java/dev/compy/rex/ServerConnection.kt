@@ -2,6 +2,7 @@ package dev.compy.rex
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
@@ -120,6 +121,12 @@ class ServerConnection(
     /** Each block's current folder name. */
     private val _folders = MutableStateFlow<Map<String, String>>(emptyMap())
     val folders: StateFlow<Map<String, String>> = _folders.asStateFlow()
+    /** Each block's current folder as a whole path, which a new pane beside it starts in. */
+    private val workingFolders = ConcurrentHashMap<String, String>()
+
+    /** The folder a block is in, as a path on its host, or null when its shell hasn't said. */
+    fun workingFolder(blockId: String): String? = workingFolders[blockId]
+
     private val _folderPaths = MutableStateFlow<Map<String, String>>(emptyMap())
     /** Where each block is, as a path shortened under a home folder: `~/compy`. */
     val folderPaths: StateFlow<Map<String, String>> = _folderPaths.asStateFlow()
@@ -131,6 +138,12 @@ class ServerConnection(
     /** Sessions a Rex action asked this client to show. */
     private val _selections = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val selections: SharedFlow<String> = _selections.asSharedFlow()
+
+    /**
+     * Carries out what a Rex action asks of this app, for the session it names, and says whether
+     * it could. Set by the screen showing one of this server's sessions, and null with none shown.
+     */
+    @Volatile var performer: ((sessionId: String?, command: ClientCommand) -> Boolean)? = null
 
     /** Blocks that just rang the terminal bell. */
     private val _bells = MutableSharedFlow<String>(extraBufferCapacity = 8)
@@ -458,6 +471,7 @@ class ServerConnection(
 
     private fun setFolder(blockId: String, pwd: String?) {
         val name = folderName(pwd) ?: return
+        folderPath(pwd)?.let { workingFolders[blockId] = it }
         _folders.update { it + (blockId to name) }
         shortFolder(pwd)?.let { path -> _folderPaths.update { it + (blockId to path) } }
     }
@@ -546,7 +560,16 @@ class ServerConnection(
                 }
                 reply(callId, null, null)
             }
-            else -> reply(callId, "not_supported", "Compy can't do that yet")
+            else -> {
+                val command = ClientActions.parse(payload["action"].str().orEmpty(), args)
+                    ?: return reply(callId, "not_supported", "Compy can't do that yet")
+                val sessionId = args?.get("session_id").str() ?: payload["session_id"].str()
+                // On the main thread, where the screen's own state is changed.
+                scope.launch(Dispatchers.Main) {
+                    val done = runCatching { performer?.invoke(sessionId, command) == true }.getOrDefault(false)
+                    if (done) reply(callId, null, null) else reply(callId, "not_supported", "Compy can't do that just now")
+                }
+            }
         }
     }
 
@@ -582,6 +605,7 @@ class ServerConnection(
                 _programs.update { it - id }
                 _folders.update { it - id }
                 _folderPaths.update { it - id }
+                workingFolders -= id
                 _progress.update { it - id }
                 statusRead -= id
                 owned.remove(id)
@@ -933,6 +957,32 @@ class ServerConnection(
         put("block", buildJsonObject { put("flavor", "com.superlogical.terminal.shell") })
     }
 
+    /**
+     * A new shell that starts in the folder the pane [near] is in, as a new pane beside one is
+     * expected to, or in its home folder when that pane's folder can't be found out.
+     */
+    private suspend fun shellIn(sessionId: String, near: String?): JsonObject {
+        val block = near ?: return shellLayout
+        // A shell without Rex's integration doesn't say where it is, but the server can still
+        // tell, by listing the folder the pane is in.
+        val folder = workingFolders[block]
+            ?: runCatching { listDir(sessionId, block, ".", withFiles = false).path }.getOrNull()?.takeIf { it.startsWith("/") }
+            ?: return shellLayout
+        return buildJsonObject {
+            put("block", buildJsonObject {
+                put("flavor", "com.superlogical.terminal.shell")
+                put("options", buildJsonObject { put("cwd", folder) })
+            })
+        }
+    }
+
+    /** The pane with the keyboard in a window of a session, or in the session's shown window. */
+    private fun focusedIn(sessionId: String, windowId: String? = null): String? {
+        val view = _views.value[sessionId] ?: return null
+        val window = view.windows.firstOrNull { it.id == windowId } ?: view.activeWindow
+        return window?.focusedBlockId ?: window?.blocks?.firstOrNull()?.id
+    }
+
     suspend fun createSession(label: String?): String? {
         val c = control ?: throw RexError("disconnected", "Not connected to ${_label.value}", 0)
         val result = c.call(
@@ -968,8 +1018,55 @@ class ServerConnection(
         ensureAttached(sessionId)
         c.call("session.new_window", buildJsonObject {
             put("session_id", sessionId)
-            put("layout", shellLayout)
+            put("layout", shellIn(sessionId, focusedIn(sessionId)))
         })
+    }
+
+    /** Moves a window just before another in the session's order, or to the end. */
+    fun moveWindow(sessionId: String, windowId: String, beforeWindowId: String?, onError: (String) -> Unit = {}) = act(onError) { c ->
+        c.call("session.move_window", buildJsonObject {
+            put("session_id", sessionId)
+            put("window_id", windowId)
+            if (beforeWindowId != null) put("before_window_id", beforeWindowId)
+        })
+    }
+
+    /** Moves a session just before another in the list, or to the end. */
+    fun moveSession(sessionId: String, beforeSessionId: String?, onError: (String) -> Unit = {}) = act(onError) { c ->
+        c.call("session.move", buildJsonObject {
+            put("session_id", sessionId)
+            if (beforeSessionId != null) put("before_session_id", beforeSessionId)
+        })
+    }
+
+    fun renameBlock(sessionId: String, blockId: String, label: String, onError: (String) -> Unit = {}) = act(onError) { c ->
+        c.call("session.set_block_label", ids(sessionId, blockId) { put("label", label) })
+    }
+
+    /** Has the server read its config file again. */
+    fun reloadConfig(onError: (String) -> Unit = {}) = act(onError) { c -> c.call("server.config_reload") }
+
+    /** Types text into a terminal as if from the keyboard. */
+    fun writeText(sessionId: String, blockId: String, text: String, onError: (String) -> Unit = {}) = act(onError) { c ->
+        ensureAttached(sessionId)
+        c.call("com.superlogical.terminal.write", ids(sessionId, blockId) { put("args", buildJsonObject { put("data", text) }) })
+    }
+
+    /** A folder on a terminal's machine, as its shell sees it: the whole path and what is in it. */
+    suspend fun listDir(sessionId: String, blockId: String, path: String, withFiles: Boolean): DirListing {
+        val c = control ?: throw RexError("disconnected", "Not connected to ${_label.value}", 0)
+        ensureAttached(sessionId)
+        val result = c.call(
+            "com.superlogical.terminal.list_dir",
+            ids(sessionId, blockId) {
+                put("args", buildJsonObject {
+                    put("path", path)
+                    put("files", withFiles)
+                    put("limit", 400)
+                })
+            },
+        ).obj()
+        return parseDirListing(result) ?: throw RexError("bad_reply", "The server didn't list that folder", 0)
     }
 
     fun closeWindow(sessionId: String, windowId: String, onError: (String) -> Unit = {}) = act(onError) { c ->
@@ -1027,7 +1124,7 @@ class ServerConnection(
             put("session_id", sessionId)
             put("window_id", windowId)
             put("bounds", boundsArray(bounds))
-            put("layout", shellLayout)
+            put("layout", shellIn(sessionId, focusedIn(sessionId, windowId)))
             put("focus", true)
         })
     }
@@ -1085,9 +1182,24 @@ class ServerConnection(
             put("anchor_id", anchorBlockId)
             put("direction", if (horizontal) "horizontal" else "vertical")
             put("side", if (before) "before" else "after")
-            put("layout", shellLayout)
+            put("layout", shellIn(sessionId, anchorBlockId))
             put("focus", true)
         })
+    }
+
+    /** Splits a pane and types a command into the new pane's shell, which starts in the same folder. */
+    fun newSplitRunning(sessionId: String, anchorBlockId: String, horizontal: Boolean, text: String, onError: (String) -> Unit = {}) = act(onError) { c ->
+        ensureAttached(sessionId)
+        val created = c.call("session.new_split", buildJsonObject {
+            put("session_id", sessionId)
+            put("anchor_id", anchorBlockId)
+            put("direction", if (horizontal) "horizontal" else "vertical")
+            put("side", "after")
+            put("layout", shellIn(sessionId, anchorBlockId))
+            put("focus", true)
+        }).obj()
+        val shell = created?.get("block_ids").arr()?.firstOrNull().str() ?: throw RexError("bad_reply", "The server didn't make the pane", 0)
+        c.call("com.superlogical.terminal.write", ids(sessionId, shell) { put("args", buildJsonObject { put("data", text) }) })
     }
 
     fun closeBlock(sessionId: String, blockId: String, onError: (String) -> Unit = {}) = act(onError) { c ->
@@ -1265,6 +1377,15 @@ class ServerConnection(
             streams.forEach { it.cancel() }
             files.forEach { runCatching { it.discard() } }
         }
+    }
+
+    /**
+     * Reads a file from the machine a terminal runs on, to preview it. [path] may be relative to
+     * the terminal's folder. Throws [RexError] with a message meant for people.
+     */
+    suspend fun download(sessionId: String, blockId: String, path: String): Download {
+        if (control == null) throw RexError("disconnected", "Not connected to ${_label.value}", 0)
+        return downloadFile(http, config.url, clientVersion, sessionId, blockId, path)
     }
 
     private fun uploadRefusal(e: RexError): String = when (e.code) {

@@ -34,3 +34,35 @@ class ShortFolderTest {
         org.junit.Assert.assertNull(shortFolder(null))
     }
 }
+
+class FolderPathTest {
+    @Test fun readsTheWholePathOfAFileUrl() {
+        assertEquals("/Users/a/my project", folderPath("file://laptop/Users/a/my%20project"))
+        assertEquals("/home/a/c++", folderPath("file:///home/a/c++"))
+        assertEquals("/srv/app", folderPath("/srv/app"))
+    }
+
+    @Test fun nothingWithoutAPath() {
+        assertEquals(null, folderPath(null))
+        assertEquals(null, folderPath("file://laptop"))
+        assertEquals(null, folderPath("relative/place"))
+    }
+
+    @Test fun quotesAPathAsOneWord() {
+        assertEquals("'/a/my work'", shellQuoted("/a/my work"))
+        assertEquals("'/a/it'\\''s'", shellQuoted("/a/it's"))
+    }
+
+    @Test fun listsFoldersAheadOfFiles() {
+        val listing = parseDirListing(
+            kotlinx.serialization.json.Json.parseToJsonElement(
+                """{"path":"/home/a","entries":[{"name":"b.txt","file":true},{"name":"Zed"},{"name":"apps","file":false}]}""",
+            ),
+        )!!
+        assertEquals(listOf("apps", "Zed", "b.txt"), listing.entries.map { it.name })
+        assertEquals("/home/a/apps", listing.child("apps"))
+        assertEquals("/home", listing.child(".."))
+        assertEquals("/", DirListing("/home", emptyList()).child(".."))
+        assertEquals("/etc", DirListing("/", emptyList()).child("etc"))
+    }
+}

@@ -56,6 +56,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         fun sendKey(key: RexKey)
         fun sendText(text: String)
         fun paste(text: String)
+        /** Pastes what the clipboard holds: its text, or a picture or file sent to the terminal's machine. */
+        fun pasteClipboard() { clipboardText()?.let { paste(it) } }
         fun sendMouse(action: String, button: String?, col: Int, row: Int)
         fun sendWheel(lines: Float, col: Int, row: Int)
         /** Modifiers latched on the key bar, consumed by the next key. */
@@ -69,6 +71,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         fun copyText(text: String)
         fun clipboardText(): String?
         fun openUrl(url: String)
+        /** Shows a file on the terminal's machine, at [line] when it isn't 0. */
+        fun openPath(path: String, line: Int) = Unit
         /** Hands text to another app through Android's share sheet. */
         fun shareText(text: String)
         fun showMessage(text: String)
@@ -547,6 +551,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         canvas.translate(originX, originY)
         canvas.scale(s, s)
         drawImages(canvas, above = false)
+        drawSelection(canvas, cols, rows, defaultFg)
         drawRows(canvas, cols, rows, defaultFg, defaultBg)
         canvas.translate(0f, scrollFrac)
         drawImages(canvas, above = true)
@@ -665,9 +670,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
      * keystroke lays out one row and scrolling lays out only the row that comes into view.
      */
     private fun drawRows(canvas: Canvas, cols: Int, rows: Int, defaultFg: Int, defaultBg: Int) {
-        val gap = max(0f, originY - (padTop - panY)) / drawScale
-        val wanted = ceil((gap + scrollFrac) / cellH).toInt()
-        val first = -min(wanted, meta[GhosttyTerminal.META_ABOVE])
+        val first = firstRow()
         if (!canvas.isHardwareAccelerated) {
             for (y in first until rows) {
                 val row = if (y < 0) rows - 1 - y else y
@@ -703,6 +706,79 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             canvas.restore()
         }
         rowNodes.end()
+    }
+
+    /**
+     * The first row to draw: 0, or a row above the screen, counted down from -1, while the view
+     * is scrolled part of a row into history or the grid sits lower than its usual place.
+     */
+    private fun firstRow(): Int {
+        val gap = max(0f, originY - (padTop - panY)) / drawScale
+        val wanted = ceil((gap + scrollFrac) / cellH).toInt()
+        return -min(wanted, meta[GhosttyTerminal.META_ABOVE])
+    }
+
+    private val selectionPath = Path()
+    private val selectionCorners = Path()
+    private val selectionRadii = FloatArray(8)
+    private val selectionPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    /**
+     * Fills the selection behind the text as one shape with every corner rounded: the outside
+     * ones, and the inside ones where a line of it reaches further than the next. The rows don't
+     * paint a selected cell's background themselves. Filled as one shape, the lines of a
+     * selection meet with no seam, also while the view is scrolled part of a row.
+     */
+    private fun drawSelection(canvas: Canvas, cols: Int, rows: Int, defaultFg: Int) {
+        val first = firstRow()
+        // The rows above the screen are kept after the screen's own, nearest first.
+        fun selected(col: Int, y: Int): Boolean {
+            val row = if (y < 0) rows - 1 - y else y
+            return cells[(row * cols + col) * 4 + 3] and FLAG_SELECTED != 0
+        }
+        var any = false
+        search@ for (y in first until rows) for (x in 0 until cols) {
+            if (selected(x, y)) {
+                any = true
+                break@search
+            }
+        }
+        if (!any) return
+        val shape = SelectionShape.build(cols, first, rows, cellW, cellH, min(cellH * 0.35f, 7f * density), ::selected)
+        selectionPath.rewind()
+        for (p in shape.pieces) {
+            val r = selectionRadii
+            r[0] = p.topLeft; r[1] = p.topLeft
+            r[2] = p.topRight; r[3] = p.topRight
+            r[4] = p.bottomRight; r[5] = p.bottomRight
+            r[6] = p.bottomLeft; r[7] = p.bottomLeft
+            selectionPath.addRoundRect(p.left, p.top, p.right, p.bottom, r, Path.Direction.CW)
+        }
+        // Apart from the lines' own shape: they reach a little into it so no gap shows, and
+        // where two outlines of one path overlap in opposite directions nothing is filled.
+        selectionCorners.rewind()
+        for (f in shape.fillets) {
+            val into = 0.5f
+            selectionCorners.moveTo(f.x - f.dx * into, f.y - f.dy * into)
+            selectionCorners.lineTo(f.x + f.dx * f.radius, f.y - f.dy * into)
+            selectionCorners.lineTo(f.x + f.dx * f.radius, f.y)
+            // A quarter circle that bows in toward the corner.
+            selectionCorners.conicTo(f.x, f.y, f.x, f.y + f.dy * f.radius, QUARTER_CIRCLE)
+            selectionCorners.lineTo(f.x - f.dx * into, f.y + f.dy * f.radius)
+            selectionCorners.close()
+        }
+        selectionPaint.color = defaultFg
+        canvas.save()
+        canvas.translate(0f, scrollFrac)
+        canvas.drawPath(selectionPath, selectionPaint)
+        if (shape.fillets.isNotEmpty()) canvas.drawPath(selectionCorners, selectionPaint)
+        canvas.restore()
+    }
+
+    /** The background a row paints for a cell. A selected cell's is painted by [drawSelection], under every row. */
+    private fun paintedBg(i: Int, defaultFg: Int, defaultBg: Int): Int {
+        val flags = cells[i + 3]
+        return if (flags and FLAG_SELECTED != 0) defaultBg else effectiveBg(cells[i + 1], cells[i + 2], flags, defaultFg, defaultBg)
     }
 
     /**
@@ -745,14 +821,11 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         // Backgrounds first, so wide glyphs and overhangs aren't clipped by the next cell.
         var x = 0
         while (x < cols) {
-            val i = rowOffset + x * 4
-            val flags = cells[i + 3]
-            val bg = effectiveBg(cells[i + 1], cells[i + 2], flags, defaultFg, defaultBg)
+            val bg = paintedBg(rowOffset + x * 4, defaultFg, defaultBg)
             if (bg != defaultBg) {
                 var end = x + 1
                 while (end < cols) {
-                    val j = rowOffset + end * 4
-                    if (effectiveBg(cells[j + 1], cells[j + 2], cells[j + 3], defaultFg, defaultBg) != bg) break
+                    if (paintedBg(rowOffset + end * 4, defaultFg, defaultBg) != bg) break
                     end++
                 }
                 fillPaint.color = bg
@@ -923,6 +996,20 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         invalidate()
     }
 
+    /** Moves a screenful towards older or newer lines, or sends Page Up or Down to a full-screen program. */
+    fun scrollPage(up: Boolean) {
+        if (appOwnsScroll) {
+            host?.sendKey(RexKey(if (up) "page_up" else "page_down"))
+            return
+        }
+        val terminal = session?.terminal ?: return
+        val page = max(1, meta[GhosttyTerminal.META_ROWS] - 1)
+        terminal.scroll(if (up) -page else page)
+        scrollFrac = 0f
+        scrollbarVisibleUntil = SystemClock.uptimeMillis() + 800
+        invalidate()
+    }
+
     /** Copies the latest command's output. False when the shell doesn't mark command output. */
     fun copyLastOutput(): Boolean {
         val terminal = session?.terminal ?: return false
@@ -941,6 +1028,16 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         val url = hyperlink ?: links.firstOrNull { it.contains(col, row) }?.url ?: return null
         // A program can print any link target, so only ever hand web links to other apps.
         return url.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+    }
+
+    /**
+     * The file a program linked at a cell, as coding agents link the files they mention. Only a
+     * link the program made counts here: a path that is merely printed is previewed from the
+     * selection menu, so a tap on ordinary text still goes to the terminal.
+     */
+    private fun fileLinkAt(col: Int, row: Int): TerminalPaths.Hit? {
+        val target = session?.terminal?.hyperlinkAt(col, row) ?: return null
+        return TerminalPaths.parse(target)
     }
 
     private fun appendCell(cp: Int): Int {
@@ -1383,6 +1480,11 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                     host?.openUrl(url)
                     return true
                 }
+                val file = fileLinkAt(col, row)
+                if (file != null) {
+                    host?.openPath(file.path, file.line)
+                    return true
+                }
             }
             // Read before the tap is passed on, which may be what brings the keyboard up.
             val typingHere = paneFocused && keyboardShown()
@@ -1397,7 +1499,8 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         }
 
         override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
-            if (scaling || selecting) return true
+            // Two fingers size the text or go to another pane. They don't scroll.
+            if (scaling || selecting || e2.pointerCount > 1) return true
             if (keepSize && zoom > 1f) {
                 panX += distanceX
                 panY += distanceY
@@ -1503,10 +1606,22 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
     private val scaleDetector = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
             scaling = true
+            pinch = TwoFinger.Kind.Undecided
+            pinchSpan = detector.currentSpan
+            pinchX = detector.focusX
+            pinchY = detector.focusY
             return true
         }
 
         override fun onScale(detector: ScaleGestureDetector): Boolean {
+            if (pinch == TwoFinger.Kind.Undecided) {
+                // Two fingers also swipe to the next pane, and no swipe keeps them exactly as far
+                // apart. Nothing is sized until they are clearly pinching.
+                pinch = TwoFinger.classify(detector.focusX - pinchX, detector.focusY - pinchY, detector.currentSpan - pinchSpan, TWO_FINGER_SLOP_DP * density)
+                // Counting from here, so the text doesn't jump by what was moved to find out.
+                return pinch == TwoFinger.Kind.Pinch
+            }
+            if (pinch != TwoFinger.Kind.Pinch) return false
             if (keepSize) {
                 zoom = (zoom * detector.scaleFactor).coerceIn(1f, MAX_ZOOM)
                 clampPan()
@@ -1522,10 +1637,15 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         }
 
         override fun onScaleEnd(detector: ScaleGestureDetector) {
-            if (!keepSize) host?.onFontSizeChanged(fontSizeSp)
+            // Only a pinch changed the size. Two fingers that tapped or swiped leave the pane's size alone.
+            if (!keepSize && pinch == TwoFinger.Kind.Pinch) host?.onFontSizeChanged(fontSizeSp)
             post { scaling = false }
         }
     })
+    private var pinch = TwoFinger.Kind.Undecided
+    private var pinchSpan = 0f
+    private var pinchX = 0f
+    private var pinchY = 0f
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -1778,6 +1898,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                 menu.add(0, ID_PASTE, 1, android.R.string.paste).setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
                 menu.add(0, ID_SHARE, 2, "Share").setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
                 menu.add(0, ID_OPEN, 2, "Open link").setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
+                menu.add(0, ID_PREVIEW, 2, "Preview file").setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
                 menu.add(0, ID_OUTPUT, 3, "Copy command output").setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
                 return true
             }
@@ -1787,7 +1908,7 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
             override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
                 when (item.itemId) {
                     ID_COPY -> selectedText()?.let { host?.copyText(it) }
-                    ID_PASTE -> host?.clipboardText()?.let { host?.paste(it) }
+                    ID_PASTE -> host?.pasteClipboard()
                     ID_SHARE -> selectedText()?.takeIf { it.isNotEmpty() }?.let { host?.shareText(it) }
                     ID_OUTPUT -> {
                         val terminal = session?.terminal
@@ -1799,6 +1920,13 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
                         } else {
                             host?.copyText(text)
                         }
+                    }
+                    ID_PREVIEW -> {
+                        // The path as it reads on screen, which keeps a line number that the
+                        // selection stopped short of, or else whatever was selected.
+                        val (sx, sy) = ordered()
+                        val file = TerminalPaths.at(rowText(), sx, sy) ?: selectedText()?.let { TerminalPaths.parse(it) }
+                        if (file == null) host?.showMessage("That doesn't look like a file's path") else host?.openPath(file.path, file.line)
                     }
                     ID_OPEN -> selectedText()?.trim()?.let { text ->
                         val url = if (text.startsWith("http://") || text.startsWith("https://")) text else "https://$text"
@@ -1956,6 +2084,11 @@ class TerminalView(context: Context, private val fonts: () -> TerminalFonts) : V
         private const val ID_OPEN = 3
         private const val ID_OUTPUT = 4
         private const val ID_SHARE = 5
+        private const val ID_PREVIEW = 6
+        /** How far two fingers move before they are taken to be pinching or swiping. The screen around the pane uses the same. */
+        const val TWO_FINGER_SLOP_DP = 16f
+        /** The weight that makes a conic curve a quarter of a circle. */
+        private const val QUARTER_CIRCLE = 0.70710677f
         private const val TRIPLE_TAP_MS = 450L
         private const val BAR_MIN_DP = 40f
         private const val BAR_TOUCH_DP = 32f

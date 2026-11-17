@@ -294,7 +294,15 @@ private fun MainLayout(
                 ) {
                     // Keyed, so nothing a workspace remembers or a gesture captured outlives its session.
                     key(workspaceConnection, workspaceSession) {
-                        Workspace(app, workspaceConnection, workspaceSession, compact = true, onShowSidebar = { onShowList(true) }, onOpenSaved = onOpenSaved, onMessage = onMessage)
+                        Workspace(
+                            app, workspaceConnection, workspaceSession, compact = true,
+                            onShowSidebar = { onShowList(true) },
+                            onOpenSaved = onOpenSaved,
+                            onOpenSettings = onOpenSettings,
+                            onOpenBoard = onOpenBoard,
+                            onAddServer = onAddServer,
+                            onMessage = onMessage,
+                        )
                     }
                 }
             }
@@ -342,6 +350,10 @@ private fun MainLayout(
                                 layoutMoving = open.isRunning,
                                 onShowSidebar = { onSidebarOpen(true) },
                                 onOpenSaved = onOpenSaved,
+                                onToggleSidebar = { onSidebarOpen(!sidebarOpen) },
+                                onOpenSettings = onOpenSettings,
+                                onOpenBoard = onOpenBoard,
+                                onAddServer = onAddServer,
                                 onMessage = onMessage,
                             )
                         }

@@ -14,6 +14,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -93,6 +94,7 @@ import dev.compy.rex.ServerConnection
 import dev.compy.rex.asWindow
 import dev.compy.rex.SessionSummary
 import dev.compy.rex.SessionView
+import dev.compy.rex.tabMoveTarget
 import dev.compy.rex.WindowView
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -443,7 +445,7 @@ private fun ServerSection(
                 view?.windows?.any { it.displayTitle(titles).contains(query, ignoreCase = true) } == true
             if (matches) {
                 CompositionLocalProvider(LocalBlockProgress provides progress) {
-                    SessionGroup(connection, session, view, selection, query, statuses, attention, titles, programs, folders, session.id in collapsed, app, onOpened, onMessage)
+                    SessionGroup(connection, session, sessions, view, selection, query, statuses, attention, titles, programs, folders, session.id in collapsed, app, onOpened, onMessage)
                 }
             }
         }
@@ -583,6 +585,8 @@ private fun NewSessionDialog(
 private fun SessionGroup(
     connection: ServerConnection,
     session: SessionSummary,
+    /** Every session on this server, in its order, which this one can be moved along. */
+    sessions: List<SessionSummary>,
     view: SessionView?,
     selection: Selection?,
     query: String,
@@ -597,18 +601,40 @@ private fun SessionGroup(
     onMessage: (String) -> Unit,
 ) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    var sessionMenu by remember { mutableStateOf(false) }
+    var windowMenu by remember { mutableStateOf<String?>(null) }
+    val place = sessions.indexOfFirst { it.id == session.id }
     Row(
         Modifier.fillMaxWidth().padding(start = 18.dp, end = 8.dp, top = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            session.label,
-            Modifier.weight(1f),
-            style = MaterialTheme.typography.labelLarge,
-            color = muted,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        // Held, a session's name offers to move it up or down the list.
+        Box(Modifier.weight(1f)) {
+            Text(
+                session.label,
+                Modifier.combinedClickable(
+                    interactionSource = null,
+                    indication = null,
+                    onLongClick = { sessionMenu = true },
+                    onClick = {},
+                ),
+                style = MaterialTheme.typography.labelLarge,
+                color = muted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            DropdownMenu(sessionMenu, onDismissRequest = { sessionMenu = false }) {
+                DropdownMenuItem(text = { Text("Move up") }, enabled = place > 0, onClick = {
+                    sessionMenu = false
+                    connection.moveSession(session.id, sessions[place - 1].id, onMessage)
+                })
+                DropdownMenuItem(text = { Text("Move down") }, enabled = place in 0 until sessions.lastIndex, onClick = {
+                    sessionMenu = false
+                    // Before the one after next, or at the end when there is none.
+                    connection.moveSession(session.id, sessions.getOrNull(place + 2)?.id, onMessage)
+                })
+            }
+        }
         RoundButton(Icons.Rounded.Add, "New window in ${session.label}", size = 30.dp, filled = false, tint = muted) {
             connection.newWindow(session.id, onMessage)
         }
@@ -634,18 +660,31 @@ private fun SessionGroup(
                 if (query.isNotBlank() && !title.contains(query, true) && !session.label.contains(query, true)) return@forEach
                 val selected = selection?.serverId == connection.config.id && selection.sessionId == session.id && view.activeWindow?.id == window.id
                 key(window.id) {
-                    WindowRow(
-                        title = title,
-                        subtitle = windowSubtitle(window, statuses, folders),
-                        selected = selected,
-                        tile = { WindowTile(window, statuses, programs, attention) },
-                        onClick = {
-                            app.select(Selection(connection.config.id, session.id))
-                            connection.focusWindow(session.id, window.id)
-                            app.recordRecent(connection.config.id, session.id, title)
-                            onOpened()
-                        },
-                    )
+                    Box {
+                        WindowRow(
+                            title = title,
+                            subtitle = windowSubtitle(window, statuses, folders),
+                            selected = selected,
+                            tile = { WindowTile(window, statuses, programs, attention) },
+                            onClick = {
+                                app.select(Selection(connection.config.id, session.id))
+                                connection.focusWindow(session.id, window.id)
+                                app.recordRecent(connection.config.id, session.id, title)
+                                onOpened()
+                            },
+                            onLongClick = { windowMenu = window.id },
+                        )
+                        // Held, a window offers to move up or down among its session's windows.
+                        DropdownMenu(windowMenu == window.id, onDismissRequest = { windowMenu = null }) {
+                            listOf(false to "Move up", true to "Move down").forEach { (forward, name) ->
+                                val move = view.tabMoveTarget(window.id, forward)
+                                DropdownMenuItem(text = { Text(name) }, enabled = move != null, onClick = {
+                                    windowMenu = null
+                                    move?.let { connection.moveWindow(session.id, window.id, it.beforeWindowId, onMessage) }
+                                })
+                            }
+                        }
+                    }
                 }
             }
             val detached by connection.detached.collectAsStateWithLifecycle()
@@ -684,6 +723,7 @@ private fun WindowRow(
     selected: Boolean,
     modifier: Modifier = Modifier,
     tile: @Composable () -> Unit,
+    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -698,7 +738,7 @@ private fun WindowRow(
             .padding(horizontal = 8.dp, vertical = 1.dp)
             .clip(RoundedCornerShape(16.dp))
             .background(background)
-            .clickable(onClick = onClick)
+            .combinedClickable(onLongClick = onLongClick, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

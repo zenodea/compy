@@ -29,7 +29,10 @@ suspend fun uploadFiles(context: Context, uris: List<Uri>): List<UploadFile> = w
                 }
             }
         }
-        val fileName = name?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: "file-${i + 1}"
+        val plainName = name?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: "file-${i + 1}"
+        // A picture copied to the clipboard often has no name of its own. Without an ending, the
+        // program that is handed its path couldn't tell that it is a picture.
+        val fileName = withExtension(plainName, runCatching { resolver.getType(uri) }.getOrNull())
         val known = size
         if (known != null && known >= 0) {
             UploadFile(fileName, known) { resolver.openInputStream(uri) ?: error("Couldn't open $fileName") }
@@ -45,6 +48,18 @@ suspend fun uploadFiles(context: Context, uris: List<Uri>): List<UploadFile> = w
             UploadFile(fileName, copy.length(), discard = { copy.delete() }) { copy.inputStream() }
         }
     }
+}
+
+/** A file's name with the ending its kind goes by, when the name has none: `image/png` makes `clip` into `clip.png`. */
+internal fun withExtension(name: String, mimeType: String?): String {
+    if ('.' in name.trimStart('.')) return name
+    val extension = when (mimeType) {
+        null -> null
+        "image/jpeg" -> "jpg"
+        "text/plain" -> "txt"
+        else -> mimeType.substringAfter('/', "").substringBefore('+').takeIf { it.isNotEmpty() && it.all { c -> c.isLetterOrDigit() } && it != "*" }
+    }
+    return if (extension == null) name else "$name.$extension"
 }
 
 /** "photo.jpg", or "3 files". */
